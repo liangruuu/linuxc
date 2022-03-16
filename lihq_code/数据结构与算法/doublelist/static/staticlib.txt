@@ -1,0 +1,16 @@
+静态库
+
+libxx.a
+xx指库名称
+
+ar -cr libxx.a xx.o
+
+发布到
+/usr/local/include
+头文件路径
+/usr/local/lib
+库文件路径
+
+gcc -L/usr/local/lib -o main main.o -lxx
+-l 参数必须在最后，有依赖
+
