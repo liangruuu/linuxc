@@ -111,19 +111,17 @@ extern int *__errno_location (void) __attribute__ ((__nothrow__ , __leaf__)) __a
 
 **02**
 
-```markdown
-r      Open text file for reading.  The stream is positioned at the beginning of the file.
-
-r+     Open for reading and writing.  The stream is positioned at the beginning of the file.
-
-w      Truncate file to zero length or create text file for writing.  The stream is positioned at the  beginning  of  the file.
-
-w+     Open for reading and writing.  The file is created if it does not exist, otherwise it is truncated.  The stream is positioned at the beginning of the file.
-          
-a      Open for appending (writing at end of file).  The file is created if it does not exist.  The stream is  positioned at the end of the file.
-
-a+     Open for reading and appending (writing at end of file).  The file is created if it does not exist.  Output is always appended to the end of the file.  POSIX is silent on what the initial read position is when using this  mode. For  glibc,  the initial file position for reading is at the beginning of the file, but for Android/BSD/MacOS, the initial file position for reading is at the end of the file.
-```
+> r      Open text file for reading.  The stream is positioned at the beginning of the file.
+>
+> r+     Open for reading and writing.  The stream is positioned at the beginning of the file.
+>
+> w      Truncate file to zero length or create text file for writing.  The stream is positioned at the  beginning  of  the file.
+>
+> w+     Open for reading and writing.  The file is created if it does not exist, otherwise it is truncated.  The stream is positioned at the beginning of the file.
+>           
+> a      Open for appending (writing at end of file).  The file is created if it does not exist.  The stream is  positioned at the end of the file.
+>
+> a+     Open for reading and appending (writing at end of file).  The file is created if it does not exist.  Output is always appended to the end of the file.  POSIX is silent on what the initial read position is when using this  mode. For  glibc,  the initial file position for reading is at the beginning of the file, but for Android/BSD/MacOS, the initial file position for reading is at the end of the file.
 
 * Truncate file to zero length or create text file for writing : 有则清空，无则创建
 * beginning of the file : 文件当中第一个有效字符
@@ -132,10 +130,7 @@ a+     Open for reading and appending (writing at end of file).  The file is cre
 * 在这六种操作文件方式里，只有r和r+最特殊，因为其他四种方式都有着The file is created if it does not exist字样。r和r+在操作一个文件的时候必须保证文件存在，如果文件不存在则结束当前调用返并回出错信息
 * 在其他一些参考书里讲到文件IO的时候，有着类似'r+b'，'w+b'，b表示二进制操作。在windows下区分两种流：文本流和二进制流这两种流在用程序进行控制的时候是不一样的，所以在windows环境下进行编程要指定是用r打开还是用r+b打开。但是在linux环境下不用指定，因为在linux环境下只有流(stream)的概念而不区分是二进制还是文本，除非是程序有可能移植到windows环境下才有必要加上b
 
-```markdown
-The mode string can also include the letter 'b' either as a last character or as a character between  the  characters  in any of the two-character strings described above.  This is strictly for compatibility with C89 and has no effect; the 'b' is ignored on all POSIX conforming systems, including Linux.  (Other systems may treat text files and binary  files  differently, and adding the 'b' may be a good idea if you do I/O to a binary file and expect that your program may be ported to non-UNIX environments.)
-
-```
+> > The mode string can also include the letter 'b' either as a last character or as a character between  the  characters  in any of the two-character strings described above.  This is strictly for compatibility with C89 and has no effect; the 'b' is ignored on all POSIX conforming systems, including Linux.  (Other systems may treat text files and binary  files  differently, and adding the 'b' may be a good idea if you do I/O to a binary file and expect that your program may be ported to non-UNIX environments.)
 
 ```c
 #include <stdio.h>
@@ -257,7 +252,7 @@ int main()
 
 # fclose和文件权限问题
 
-fopen的返回值是一个指针，此时需要思考这个指针存放在的空间是哪一块？
+fopen的返回值是一个指针，此时需要思考这个指针指向的空间是哪一块？
 下面给出三种可能的情况1. 栈；2. 静态区；3. 堆
 
 1. 如果返回指针所指空间存在于栈上(×)
@@ -442,6 +437,258 @@ drwxrwxr-x 3 liangruuu liangruuu  4096 Mar 17 07:39 ../
 -rw-rw-r-- 1 liangruuu liangruuu   351 Mar 17 10:23 maxfopen.c
 -rw-rw-r-- 1 liangruuu liangruuu     0 Mar 17 10:12 tmp
 ```
+
+# fgetc和fputc
+
+以后凡是碰到函数的返回值是指针的情况，要多问自己一句这个指针指向的内容是静态区里的一块地址还是堆上的一块地址
+
+> // 二进制字符的读写
+>
+> 1. fgetc();    
+> 2. fputc();
+>
+> // 字符串读写
+>
+> 1. fgets();   
+> 2. fputs();
+>
+> // 二进制数据块的操作
+>
+> 1. fread();    
+> 2. fwrite();
+
+* getchar()
+
+> SYNOPSIS
+>
+> > int fgetc(FILE *stream);
+> >
+> > char *fgets(char *s, int size, FILE *stream);
+> >
+> > int getc(FILE *stream);
+> >
+> > int getchar(void);
+> 
+> DESCRIPTION
+>
+> > fgetc()  reads the next character from stream and returns it as an unsigned char cast to an int, or EOF on end of file or error.
+>>
+> > getc() is equivalent to fgetc() except that it may be implemented as a macro which evaluates stream more than once.
+> >
+> > getchar() is equivalent to getc(stdin).
+> >
+> > fgets() reads in at most one less than size characters from stream and stores them into  the  buffer  pointed  to  by  s. Reading  stops  after  an EOF or a newline.  If a newline is read, it is stored into the buffer.  A terminating null byte ('\0') is stored after the last character in the buffer.
+> 
+> 1. 有三个标准流是被默认打开的：stdin、stdout、stderr，getchar()在功能上属于字符读入的函数，字符默认是从标准的输入设备上来的
+> 2. getc() is equivalent to fgetc()：getc又相当于fgetc
+> 3. getc和fgetc除了函数名不同其余都相同
+
+2. getc获取的内容不仅仅局限于终端，它可以指定从任意成功打开的流中获取内容，它的返回值和getchar是一样的，返回的是读到字符的整型形式。因为读到的是一个unsinged char型数据，但是防止出错所以就把返回值用整型数据来代替，如果失败或者读到文件末尾了则返回EOF。
+
+    > RETURN VALUE
+    >
+    > > fgetc(), getc() and getchar() return the character read as an unsigned char cast to an int or EOF on end of file  or  error.
+
+ 	3. 这两个函数一个会被定义成宏，一个会被定义成函数。getc()最原始的定义会被定义成宏使用，fgetc()被定义成函数。关于函数和宏的区别主要在于要写哪一部分内容。在数据结构中，内核链表通篇都是用宏来进行实现了，没有任何函数，因为内核在帮助节省一点一滴的时间，宏不占用调用时间，只占用编译时间，函数的调用则恰恰是相反的。但如果是在写应用态程序的话，建议以函数形式为主，因为要的是稳定安全
+
+* putchar()
+
+> SYNOPSIS
+>
+> >  int fputc(int c, FILE *stream);
+> >
+> >  int fputs(const char *s, FILE *stream);
+> >
+> >  int putc(int c, FILE *stream);
+> >
+> >  int putchar(int c);
+> >
+> >  int puts(const char *s);
+>
+> DESCRIPTION
+>
+> > fputc() writes the character c, cast to an unsigned char, to stream.
+> >
+> > fputs() writes the string s to stream, without its terminating null byte ('\0').
+> >
+> > putc() is equivalent to fputc() except that it may be implemented as a macro which evaluates stream more than once.
+> >
+> > putchar(c) is equivalent to putc(c, stdout).
+> >
+> > puts() writes the string s and a trailing newline to stdout.
+> >
+> > Calls  to  the  functions  described  here can be mixed with each other and with calls to other output functions from the stdio library for the same output stream.
+>
+> 1. putchar(c) is equivalent to putc(c, stdout) : 把指定的字符输出到stdout上，putchar相当于putc(c, stdout)的二次封装，而putc又相当于fputc
+>
+> 2. int putc(int c, FILE *stream) : 指的是指定一个输出项，但是它的走向是走到一个指定的流上，这个流可以是标准的输出、出错也可以是任何的成功打开的文件
+>
+> 3. fputc和putc跟fgetc和getc的区别是一样的
+
+* 实现文件copy的功能，指令为`mycp src dest`
+
+* 以下代码为程序骨架
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char **argv)
+{
+    fopen();
+    fopen();
+    
+    while(1)
+    {
+        fgetc();
+        fputc();
+    }
+    
+    fclose();
+    fclose();
+    
+    exit(0);
+}
+```
+
+1. 6-7&15-16：由于有两个文件，所以要调用两次fopen，然后理所应当谁打开谁关闭，所以都要调用两次fclose
+2. 9-13：应该是从src中读一块往dest中写一块，用fgetc从源文件当中读一个字符，再往目标文件中写一个字符，而这个过程是需要放在一个循环当中的，即第一次写一次，并且有必要的话需要校验每一条语句的输出情况
+
+* 完整代码
+
+```c
+# mycp.c
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char **argv)
+{
+    FILE *fps, *fpd;
+    int ch;
+
+    if (argc < 3)
+    {
+        fprintf(stderr, "Usage:%s <src_file> <dest_file>\n", argv[0]);
+        exit(1);
+    }
+
+    fps = fopen(argv[1], "r");
+    if (fps == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    fpd = fopen(argv[2], "w");
+    if (fpd == NULL)
+    {
+        perror("fopen()");
+        fclose(fps);
+        exit(1);
+    }
+
+    while (1)
+    {
+        ch = fgetc(fps);
+        if (ch == EOF)
+            break;
+        fputc(ch, fpd);
+    }
+
+    fclose(fpd);
+    fclose(fps);
+
+    exit(0);
+}
+```
+
+1. 11-15：在程序中写足够多的注释或者说明性的内容，只要用到命令行的传参则必须判断命令行的参数
+2. 15-20：以只读方式打开源文件并且返回FILE\*，并且马上判断有无出错，选择r而不选择r+就是为了当源文件不存在时报错
+3. 22-28：以只写方式打开目标文件并且返回FILE\*，并且马上判断有无出错
+4. 38-39：首先关闭依赖别人的文件对象再关闭被依赖的文件对象
+5. 7：ch被定义为int类型数据而不是char*，因为当getc出错时返回的值为-1，字符型数据的值没有负值
+6. 30-36：fgetc从源文件读取数据，返回值为读取到的字符并且以整型接收然；EOF被判断为文件末尾；fputc把ch值写入目标文件
+7. 28：当src文件成功打开，但是目标文件打开失败的话，按照之前代码的逻辑就会出现内存泄漏。因为当src文件成功打开时就有了一个合法的文件指针指向一个FILE结构体，如果之后文件读取失败的话，还没来得及关闭之前的文件指针。所以在判断fpd==null的代码体里需要加上对之前已打开文件的关闭逻辑
+
+```c
+# result
+
+# ./mycp /etc/services /tmp/out
+# diff /etc/services /tmp/out
+# diff指令无输出则表明两个文件相同
+
+# ./mycp
+# Usage:./mycp <src_file> <dest_file>
+```
+
+* 用fpetc实现小功能：文件有属性，其中有一个size值代表文件的大小，指的是文件当中的有效字符个数，当我们有了之前介绍的几个函数之后，我们就可以测试一个文件有多少个有效字符
+
+```markdown
+total 84
+drwxrwxr-x 2 liangruuu liangruuu  4096 Mar 17 13:20 ./
+drwxrwxr-x 3 liangruuu liangruuu  4096 Mar 17 07:39 ../
+-rw-rw-r-- 1 liangruuu liangruuu    26 Mar 17 07:50 errno.c
+-rwxrwxr-x 1 liangruuu liangruuu 17016 Mar 17 10:12 fopen*
+-rw-rw-r-- 1 liangruuu liangruuu   389 Mar 17 10:13 fopen.c
+-rwxrwxr-x 1 liangruuu liangruuu 16832 Mar 17 10:23 maxfopen*
+-rw-rw-r-- 1 liangruuu liangruuu   351 Mar 17 10:23 maxfopen.c
+-rwxrwxr-x 1 liangruuu liangruuu 17000 Mar 17 13:20 mycp*
+-rw-rw-r-- 1 liangruuu liangruuu   634 Mar 17 12:47 mycp.c
+-rw-rw-r-- 1 liangruuu liangruuu     0 Mar 17 10:12 tmp
+```
+
+```c
+# fgetc.c
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char **argv)
+{
+    FILE *fp;
+    int count = 0;
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <src_file>\n", argv[0]);
+        exit(1);
+    }
+
+    fp = fopen(argv[1], "r");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    while (fgetc(fp) != EOF)
+    {
+        count++;
+    }
+
+    printf("count = %d\n", count);
+
+    fclose(fp);
+
+    exit(0);
+}
+```
+
+1. 9：计数器count，表示读取了多少个字符，假设当前用来测试的文件不会超过整型的最大返回，如果要测试大文件的话数据类型可能会溢出，这时就需要考虑用long类型或者long long类型来进行接收
+2. 24-27：不需要判断读取到的具体字符，只需要直到读到的是否是EOF，即文件末尾，如果不是的话就代表读取到的字符是有效字符
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
