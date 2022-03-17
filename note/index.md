@@ -255,3 +255,197 @@ int main()
 # fopen():No such file or directory
 ```
 
+# fclose和文件权限问题
+
+fopen的返回值是一个指针，此时需要思考这个指针存放在的空间是哪一块？
+下面给出三种可能的情况1. 栈；2. 静态区；3. 堆
+
+1. 如果返回指针所指空间存在于栈上(×)
+
+```c
+FILE *fopen(const char *pathname, const char *mode)
+{
+    # 1. 定义FILE类型变量
+	FILE tmp；
+    # 2. 给结构体内的成员变量赋值
+    tmp.xxx = xxx;
+    tmp.yyy = yyy;
+    ......
+    
+    # 3. 返回指针
+    return  &tmp;
+}
+```
+
+这种方式是不对的，因为这段函数企图返回一个局部变量的地址，而这个局部变量tmp会在函数调用结束后比回收，从而使得tmp指针失效并且释tmp指针空间
+
+2. 如果返回指针所指空间存在于静态区上(×)
+
+```c
+FILE *fopen(const char *pathname, const char *mode)
+{
+    # 1. 定义FILE类型静态变量
+	static FILE tmp；
+    # 2. 给结构体内的成员变量赋值
+    tmp.xxx = xxx;
+    tmp.yyy = yyy;
+    ......
+    
+    # 3. 返回指针
+    return  &tmp;
+}
+```
+
+因为tmp变量被存放在了静态区上，所以当函数调用执行完时tmp空间还会被保留直到进程结束为止。但是此时就会有这样一个问题：保存在静态区上的变量有一个特点就是函数被重复调用的时候，被static修饰的变量只会被声明一次，也就是说即使调用10次fopen，给tmp变量分配的空间也只有一块。这就会导致打开第一个文件用FILE\*操作是正确的，然后打开第二个文件时依然会返回一个FILE\*，但是第二个文件填充的结构体就是第一个文件填充的结构体，也就是说第二次的结果会把第一次的结果给覆盖掉，即之前的文件就没法用了
+
+3. 如果返回指针所指空间存在于堆上(√)
+
+```c
+FILE *fopen(const char *pathname, const char *mode)
+{
+    # 1. 定义FILE类型指针变量
+	FILE *tmp = NULL；
+    tmp = malloc(sizeof(FILE));
+    
+    # 2. 给结构体内的成员变量赋值
+    tmp->xxx = xxx;
+    tmp->yyy = yyy;
+    ......
+    
+    # 3. 返回指针
+    return  tmp;
+}
+```
+
+fopen做了一步动态分配空间的操作即malloc，还有一个对应的函数fclose()，与malloc相对应的free函数就定义在fclose()中。如果一个函数的返回值是指针并且有一个与之对应的逆操作函数，比如fopen与fclose，则多半可以确定这个函数返回的指针就存放在堆上。如果没有互逆操作，则可能存放在堆上也有可能存放在静态区上，这需要代码去验证。
+
+>int fclose(FILE *stream)
+>
+>* FILE *stream : 通过fopen成功打开的一个流
+>
+>1. 一般情况下fclose的返回值很少去校验，因为一般我们认为fclose不会失败
+>2. RETURN VALUE
+>    Upon successful completion, 0 is returned.  Otherwise, EOF is returned and errno is set to indicate the error.  In either case, any further access (including another call to fclose()) to the stream results in undefined behavior.
+
+2. EOF是typedefine出来的一个宏，宏值一般情况下是-1，但即便告知了EOF的宏值一般情况为-1，也应该去验证EOF这个宏名，因为宏值未必是-1。有宏名用宏名，不要轻易用宏值
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+
+int main()
+{
+    FILE *fp;
+
+    fp = fopen("tmp", "w");
+    if (fp == NULL)
+    {
+
+        fprintf(stderr, "fopen():%s\n", strerror(errno));
+
+        exit(1);
+    }
+    puts("ok!");
+
+    fclose(fp);
+
+    exit(0);
+}
+```
+
+以上程序经过了`打开文件->ok->释放文件`这几步操作
+
+在linux编程领域里有几个概念需要强调：1. 谁打开谁关闭；2. 谁申请谁释放；3. 一切皆文件等设计原理，还有一个重要的理念就是`是资源就有上限`，当前可以在一个进程当中利用fopen打开文件，但是打开文件个数一定是有上限的。不管这个上限设计的有多大，100个也好，10个也好但都是有上限的。就比如在写递归函数的时候也要有一个上限的控制，那么现在来做一个实验看下一个进程的空间最多能打开多少个文件？
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+int main(void)
+{
+    FILE *fp;
+    int count = 0;
+
+    while (1)
+    {
+        fp = fopen("tmp", "r");
+        if (fp == NULL)
+        {
+            perror("fopen()");
+            break;
+        }
+        count++;
+    }
+
+    printf("count = %d\n", count);
+
+    exit(0);
+}
+
+
+# result
+# fopen(): Too many open files
+# count = 8174
+```
+
+程序结果显示在该进程下最多能打开8174个文件，但其实不是。我们提到stream流的概念，在不更改当前环境的情况下，实际上有3个流在一个进程产生的时候就默认打开了：1. stdin；2. stdout；3. stderr，所以当前进程最多能打开的文件个数是8174+3=8177个
+我们在程序目录下使用`ulimit -a`命令就能显示当前进程最多打开的文件个数
+
+* 这里的最多文件打开数为什么是8192而不是8174暂且不知，应该是有其他的流在占用这文件打开数
+
+* -a表示查看所有项
+
+* ulimit -n 数字 : 更改最多文件打开数
+
+```markdown
+core file size          (blocks, -c) 0
+data seg size           (kbytes, -d) unlimited
+scheduling priority             (-e) 0
+file size               (blocks, -f) unlimited
+pending signals                 (-i) 31399
+max locked memory       (kbytes, -l) 65536
+max memory size         (kbytes, -m) unlimited
+open files                      (-n) 8192
+pipe size            (512 bytes, -p) 8
+POSIX message queues     (bytes, -q) 819200
+real-time priority              (-r) 0
+stack size              (kbytes, -s) 8192
+cpu time               (seconds, -t) unlimited
+max user processes              (-u) 31399
+virtual memory          (kbytes, -v) unlimited
+file locks                      (-x) unlimite
+```
+
+执行`ulimit -n 1024`指令后的程序结果
+
+```c
+# result
+# fopen(): Too many open files
+# count = 1006
+```
+
+我们在调用fopen函数打开tmp文件时使用的时'w'形式，tmp文件的属性是'-rw-rw-r--'，即664。在创建文件的时候并没有提供参数或者接口去指定文件权限，所以文件权限并不是凭空出来的，文件权限遵循公式`0666 & ~umask`，这里的umask值为0002，umask存在的意义就是为了防止产生权限过松的文件，umask的值越大，文件权限值就会越低。比如说写一个进程，我怕这个进程出现bug被别人利用，我们就可以禁止产生文件或者是利用umask去产生权限很低的文件
+
+```markdown
+# /home/liangruuu/study/linuxc/code/io/stdio
+
+drwxrwxr-x 2 liangruuu liangruuu  4096 Mar 17 10:23 ./
+drwxrwxr-x 3 liangruuu liangruuu  4096 Mar 17 07:39 ../
+-rw-rw-r-- 1 liangruuu liangruuu    26 Mar 17 07:50 errno.c
+-rwxrwxr-x 1 liangruuu liangruuu 17016 Mar 17 10:12 fopen*
+-rw-rw-r-- 1 liangruuu liangruuu   389 Mar 17 10:13 fopen.c
+-rwxrwxr-x 1 liangruuu liangruuu 16832 Mar 17 10:23 maxfopen*
+-rw-rw-r-- 1 liangruuu liangruuu   351 Mar 17 10:23 maxfopen.c
+-rw-rw-r-- 1 liangruuu liangruuu     0 Mar 17 10:12 tmp
+```
+
+
+
+
+
+
+
