@@ -931,19 +931,133 @@ int main(int argc, char **argv)
 
 
 
+# 标准IO-printf和scanf函数族
 
+> SYNOPSIS
+>
+> > #include <stdio.h>
+> >
+> > int printf(const char *format, ...);
+> >
+> > int fprintf(FILE *stream, const char *format, ...);
+> >
+> > int sprintf(char *str, const char *format, ...);
+> >
+> > int snprintf(char *str, size_t size, const char *format, ...);
+>
+> 1. int printf(const char *format, ...)：作用是把省略号部分的输出项所对应的值按照前面format当中约定的格式输出到stdout流上
+> 2. int fprintf(FILE *stream, const char *format, ...)：当前流往哪里输出就往哪走向，最好不要把所有的输出都放在stdout流上，把省略号部分的输出项按照format指定格式放到指定的FILE *stream上去
+> 3. 在标准IO中有一个类型是贯穿始终的，那就是FILE
+> 4. int sprintf(char *str, const char *format, ...)：把省略号部分代表的内容按照format格式输出到字符串str当中去
+> 5. sprintf可以把不同格式的字符拼接起来并且存入到一个字符串中
+> 6. int snprintf(char *str, size_t size, const char *format, ...)：把省略部分的输出项按照format格式输出到字符串str当中去，str指针所指地址空间大小为size
 
+2. 类似于与mycpy.c文件中，当命令行传参不正确的时候就用fprintf来报错，并把出错信息往stderr流上输出。stdin也就是标准输入，比如键盘鼠标等设备，stdout、stderr都指向目前的标准的输出设备，比如显示屏。这些都是默认的设置，我们也可以根据需要去改变它们，比如说现在有需要把stderr不再指向终端，而是指向一个打开文件，这就类似于linux里重定向echo的概念。所以经常使用fprintf把报错信息给输出到stderr上，因为stderr不仅能够输出到显示器上，也能通过设置从而输出重定向到一个文件里而不是终端上，有点类似于记录报错日志的感觉，fprintf首字母f代表的就是一个流(FILE*)
 
+    ```c
+    if (argc < 3)
+    {
+        fprintf(stderr, "Usage:%s <src_file> <dest_file>\n", argv[0]);
+        exit(1);
+    }
+    ```
 
+    <img src="index.assets/image-20220318123026437.png" alt="image-20220318123026437" style="zoom:80%;" />
 
+4. atoi()：把一个串转换成一个整型数
 
+> SYNOPSIS
+>
+> > #include <stdlib.h>
+> >
+> > int atoi(const char *nptr);
+>
+> 1. int atoi(const char *nptr)：传入参数是一个字符串，返回值是整型值。如果字符串中夹杂着字符的话，就会拿到字母或者尾0为止
 
+```c
+# atoi.c
 
+#include <stdio.h>
+#include <stdlib.h>
 
+int main(void)
+{
 
+    char str[] = "123456";
+    printf("%d\n", atoi(str));
+    char str2[] = "123a56";
+    printf("%d\n", atoi(str2));
 
+    exit(0);
+}
+```
 
+```c
+# result 
+# 123456
+# 123
+```
 
+5. 比如说把一些信息综合起来，而最终得到的完整信息是有id、串、结构体、float...换句话说需要一种综合的数据类型
+
+```c
+# atoi.c
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+
+    int year = 2020, month = 12, day = 30;
+    printf("%d-%d-%d\n", year, month, day);
+
+    exit(0);
+}
+
+```
+
+```c
+# result 
+# 2020-12-30
+```
+
+* 10：这行代码能做出一种假象即输出了“2020-12-30”这行字符串，但是却没办法当做一个完整的串来处理。sprintf函数却能把多种不同的数据类型按照特定一对一的格式把它放在字符串中
+
+```c
+# atoi.c
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void)
+{
+
+    char buf[1024];
+    int year = 2020, month = 12, day = 30;
+    sprintf(buf, "%d-%d-%d", year, month, day);
+    puts(buf);
+
+    exit(0);
+}
+```
+
+* 12：现在就拿到了一个综合起来的串用来承载所要求的的年月日输出，并且是以一个完整的串输出的
+
+6. 在谈到gets函数的时候提到了用fgets来替代它，因为gets是不检查缓冲区大小的，即不知道buffer有多大，所以很容易造成缓冲区溢出。同理sprintf依然存在相同的问题：str所指向的空间大小未知，所以就用snprintf来解决这个缓冲区溢出的问题，所以在写程序的时候就要有意识的去注意内存溢出或者内存泄露的问题。str所指地址空间所能容纳的数据大小为size-1个字节，因为要给尾0预留一个字节。
+
+> SYNOPSIS
+>
+> > #include <stdio.h>
+> >
+> > int scanf(const char *format, ...);
+> > int fscanf(FILE *stream, const char *format, ...);
+> > int sscanf(const char *str, const char *format, ...);
+>
+> 1. int scanf(const char *format, ...)：从终端获取内容并且按照format格式放到省略号代表的一个个地址上去
+> 2. int fscanf(FILE *stream, const char *format, ...)：从一个指定流中获取，当然这个流包括stdin，按照format格式放到地址当中去
+> 3. int sscanf(const char *str, const char *format, ...)：数据来源是一个字符串，其余同理
+> 4. 在scanf一系列的函数中要慎重使用%s这个格式，因为在format部分设置%s，则需要在省略号部分给出地址，但是这一步非常危险，因为在终端输入或者文件取数据的时候是不清楚有待拿的字符串是有多长的，所以依然是看不到目标位置有多大，这是scanf在使用时候最大的缺陷之一
 
 
 
