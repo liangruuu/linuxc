@@ -1059,25 +1059,273 @@ int main(void)
 > 3. int sscanf(const char *str, const char *format, ...)：数据来源是一个字符串，其余同理
 > 4. 在scanf一系列的函数中要慎重使用%s这个格式，因为在format部分设置%s，则需要在省略号部分给出地址，但是这一步非常危险，因为在终端输入或者文件取数据的时候是不清楚有待拿的字符串是有多长的，所以依然是看不到目标位置有多大，这是scanf在使用时候最大的缺陷之一
 
+# 标准IO-fseeko和ftell
+
+操作文件位置指针
+
+> NAME
+>
+> > fgetpos, fseek, fsetpos, ftell, rewind - reposition a stream
+>
+> SYNOPSIS
+>
+> > #include <stdio.h>
+> >
+> > int fseek(FILE *stream, long offset, int whence);
+> >
+> > long ftell(FILE *stream);
+> >
+> > void rewind(FILE *stream);
+> >
+>
+> 1. int fseek(FILE *stream, long offset, int whence)
+>     * FILE *stream：指定要操作的FILE流
+>     * long offset：偏移量，即要偏移多大的字符
+>     * int whence：相对位置，意为从哪个位置开始偏移。位置有三种选项，分别是：SEEK_SET,  SEEK_CUR, SEEK_END
+>     * return int：使用feek()函数成功的话返回值为0，否则返回值为-1并且设置errno
+> 2. long ftell(FILE *stream)：反映当前文件位置指针在哪
+>     * FILE *stream：指定要操作的FILE流
+> 3. void rewind(FILE *stream)
+>     * FILE *stream：指定要操作的FILE流
+> 4. fseek也可以帮助完成一个空洞文件
+>
+> DESCRIPTION
+>
+> > The fseek() function sets the file position indicator for the stream pointed to by stream.  The new position, measured in bytes, is obtained by adding offset bytes to the position specified by whence.  If whence is set to  SEEK_SET,  SEEK_CUR, or  SEEK_END,  the  offset  is relative to the start of the file, the current position indicator, or end-of-file, respecively.  A successful call to the fseek() function clears the end-of-file indicator for the stream and undoes any effects of the ungetc(3) function on the same stream.
+>
+> RETURN VALUE
+>
+> > The  rewind() function returns no value.  Upon successful completion, fgetpos(), fseek(), fsetpos() return 0, and ftell() returns the current offset.  Otherwise, -1 is returned and errno is set to indicate the error.
+>
+> 
+
+在讲到fopen函数的时候说到过，由于打开文件方式不同导致文件位置指针不同，有的在文件首，有的在文件尾，而且还有一个概念叫做当前位置，文件的读和写都是发生在当前位置。
+
+```c
+// 假设需要这样的实现：
+
+// 打开文件
+fp = fopen();
+
+// 利用fputc()往指针fp指向的文件每次写入一个字符，并且执行10次
+fputc(fp) * 10
+
+// 想要读出写入文件的10个字符
+fgetc(fp) * 10
+```
+
+我们会认为想要读出写入文件的10个字符就用`fgetc(fp) * 10`代码去实现，其实不是这样的。因为文件当中有个文件位置指针，文件位置指针就特别像眼睛一样，比如说眼睛在读报纸的实收是顺序依次向后看的，没有人在读报纸的时候是永远在读第一个字节的，所以在读写文件的时候也是同样的情况，读/写完第一个字节然后第二个第三个...文件位置指针所在的位置被称为当前位置，读和写一定是发生在当前位置的，所以之前给出的伪代码是显然无法实现读取10个被写入相同文件中的字符的，因为在利用fputc写进10个字符的时候，文件位置指针已经向后偏移了，现在是指针第11个字符的位置，如果在这个位置读取10次的话，其实文件位置指针是向后移动再读取10个。
+
+```c
+// 打开文件
+fp = fopen();
+
+// 利用fputc()往指针fp指向的文件每次写入一个字符，并且执行10次
+fputc(fp) * 10
+    
+fclose();
+
+fp = fopen();
+
+// 想要读出写入文件的10个字符
+fgetc(fp) * 10
+```
+
+如果没有其他机制介入的话，实现该读写操作的方法就是关闭再打开，让文件位置指针重新定位到文件开头。而且假设这10个字符是在文件的中间位置写的，那么即使关掉文件再打开也无法实现该功能，因为无法找到刚才的位置，而本节介绍的函数就是来解决这些问题的，所以他们的功能被叫做reposition a stream，即重新定位一个流。当然我们会有一些相对位置，是要定位到文件首还是文件尾，还是说当前位置向前多少、向后多少...
+
+1. SEEK_SET表示文件头，SEEK_CUR代表文件当前位置，SEEK_END表示文件尾。如果想要使用fseek实现读取写入文件的10个字节的话，伪代码如下：
+
+```markdown
+fp = fopen();
+
+fputc(fp) * 10
+    
+# 把指针定义到文件开头：偏移量为0，然后偏移的位置设置为SEEK_SET
+fseek(fp, 0, SEEK_SET);
+# 如果字符不是从文件首开始写的，向前偏移10个字节就能读到刚才写的10个字节了
+fseek(fp, -10, SEEK_CUR);
 
 
+fgetc(fp) * 10
+```
+
+2. ftell经常和fseek放在一起使用，即其实我们可以用另外一种方式获取文件大小。在之前的代码中我们其实写过一份代码用来获得文件大小，现在我们使用feek和ftell来获取文件大小，代码见文件`flen.c`
+
+```c
+// fget.c
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char **argv)
+{
+    FILE *fp;
+    int count = 0;
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <src_file>\n", argv[0]);
+        exit(1);
+    }
+
+    fp = fopen(argv[1], "r");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    while (fgetc(fp) != EOF)
+    {
+        count++;
+    }
+
+    printf("count = %d\n", count);
+
+    fclose(fp);
+
+    exit(0);
+}
+```
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+#define BUFSIZE 1024
+
+int main(int argc, char **argv)
+{
+    FILE *fp;
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <file>\n", argv[0]);
+        exit(1);
+    }
+
+    fp = fopen(argv[1], "r");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    fseek(fp, 0, SEEK_END);
+    printf("%ld\n", ftell(fp));
+
+    fclose(fp);
+
+    exit(0);
+}
+
+```
+
+* 23-24：不管文件之前的位置指针在哪，即不管用什么方式打开的，都需要把第三个参数设置为文件末尾，然后利用ftell()，它会反映文件位置指针的位置，此时ftell的返回值就代表着文件内容字节数
+
+```markdown
+# result
+
+ # ./flen flen.c
+ > 414
+ 
+ # ls -l flen.c
+ > -rw-rw-r-- 1 liangruuu liangruuu 414 Mar 18 18:39 flen.c
+```
+
+3. rewind()不需要返回值，也就是我们人为rewind()函数不会出错，它的功能等同于代码`(void) fseek(stream, 0L, SEEK_SET)`，所以rewind完成的功能是不管文件位置指针在哪，只要在程序中执行了rewind，那么文件位置指针一定指向了文件开始处。所以在01给出的代码可以以rewind的形式给出
+
+```markdown
+fp = fopen();
+
+fputc(fp) * 10
+    
+rewind(fp);
 
 
+fgetc(fp) * 10
+```
 
+4. 空洞文件中全部或者一部分充斥的是字符0，这里的字符0不是指用单引号括起来的'0'，而是字符的ASCII码值为0的哪个特殊的字符，也就是指的是空字符。大家都用过下载工具比如说迅雷，用这些下载工具下载一部2GB大小的电影，会在建立下载任务之后在磁盘上马上创建一个文件，那么基本上下载工具产生的那个文件一被创建就应该是源文件的大小，而不是从1个字节大小慢慢涨到2GB大小，因为下载工具不会在下载到一半的时候然后告知空间不足，它会在建立下载任务的时候磁盘容量是多少、当前文件有多大等等，类似于在steam上下载游戏时的弹窗界面显示信息。那么空洞文件就是刚刚建立下载任务时被创建的文件，所要产生的效果就是先占有磁盘空间，当创建一个文件的时候，文件大小本应该为0，下载工具在文件产生的时候立马调用fseek，把产生文件打开并且给它的大小从SEEK_SET开始直接延伸到2G大小的磁盘空间，这2G个空间里存放的全部都是字符0，然后把这2G空间切成片，用多进程或多线程进行每一小块的下载。
 
+> NAME
+>
+> > fflush - flush a stream
+>
+> SYNOPSIS
+>
+> > #include <stdio.h>
+> >
+> > int fflush(FILE *stream);
+>
+> 1. int fflush(FILE *stream)：刷新流
+>     
 
+1. 给一个小例子
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
 
+int main(int argc, char **argv)
+{
+    int i;
 
+    printf("before while(1)");
+    while(1);
+    printf("after while(1)");
 
+    exit(0);
+}
 
+```
 
+直觉上来看最后程序的结果是只输出"before while(1)"，在死循环后被定义的打印不出来，可事实是两个都打印不出来
 
+<img src="index.assets/image-20220318200239323.png" alt="image-20220318200239323" style="zoom:80%;" />
+printf一系列的函数往标准终端进行输出的时候，标准输出是典型的行缓冲模式，即碰到换行或者是一行内容满了的情况下刷新缓冲区，所以在没有特殊格式要求的情况下printf上要加上\n
 
+<img src="index.assets/image-20220318200628352.png" alt="image-20220318200628352" style="zoom:80%;" />
 
+还有一种方式就是使用fflush函数强制刷新缓冲区
 
+> DESCRIPTION
+>
+> > If the stream argument is NULL, fflush() flushes all open output streams.
+>
+> 1. 如果有多个流需要刷新的话就只需要写一句fflush()，并且传参为空即可
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
 
+int main(int argc, char **argv)
+{
+    int i;
+
+    // printf("before while(1)\n");
+    printf("before while(1)");
+    // 1. 要么单独传入某一个流
+    fflush(stdout);
+
+    while(1);
+    // printf("after while(1)\n");
+    printf("after while(1)");
+    // 2. 要么就传空参数
+    fflush(NULL);
+
+    exit(0);
+}
+```
+
+<img src="index.assets/image-20220318201046677.png" alt="image-20220318201046677" style="zoom:80%;" />
+
+缓冲区的作用：大多数情况下是好事，最大的作用就是合并系统作用
+缓冲的模式：
+
+* 行缓冲：换行的时候刷新缓冲区数据、缓冲区满了的时候刷新或者强制刷新(使用fflush)，典型的例子比如说标准输入stdout
+* 全缓冲：缓冲区满了的时候刷新或者强制刷新，只要不是终端设备默认是全缓冲模式，stdout是行缓冲模式就是因为它是终端设备
+* 无缓冲：如stderr，因为一旦出错立马输出，什么条件都不等待，也不等待缓冲区是否满了等情况
 
 
 
