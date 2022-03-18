@@ -525,7 +525,7 @@ drwxrwxr-x 3 liangruuu liangruuu  4096 Mar 17 07:39 ../
 >
 > 3. fputc和putc跟fgetc和getc的区别是一样的
 
-* 实现文件copy的功能，指令为`mycp src dest`
+> 实现文件copy的功能，指令为`mycp src dest`
 
 * 以下代码为程序骨架
 
@@ -622,7 +622,7 @@ int main(int argc, char **argv)
 # Usage:./mycp <src_file> <dest_file>
 ```
 
-* 用fpetc实现小功能：文件有属性，其中有一个size值代表文件的大小，指的是文件当中的有效字符个数，当我们有了之前介绍的几个函数之后，我们就可以测试一个文件有多少个有效字符
+> 用fpetc实现小功能：文件有属性，其中有一个size值代表文件的大小，指的是文件当中的有效字符个数，当我们有了之前介绍的几个函数之后，我们就可以测试一个文件有多少个有效字符
 
 ```markdown
 total 84
@@ -677,6 +677,309 @@ int main(int argc, char **argv)
 
 1. 9：计数器count，表示读取了多少个字符，假设当前用来测试的文件不会超过整型的最大返回，如果要测试大文件的话数据类型可能会溢出，这时就需要考虑用long类型或者long long类型来进行接收
 2. 24-27：不需要判断读取到的具体字符，只需要直到读到的是否是EOF，即文件末尾，如果不是的话就代表读取到的字符是有效字符
+
+```c
+# result
+
+# ./fgetc ./fopen.c
+#count = 389
+```
+
+# fread和fwrite
+
+有一个函数叫做gets，gets()很危险不应该去使用，因为其不检查缓冲区的溢出
+
+>NAME
+>
+>> gets - get a string from standard input (DEPRECATED) 
+>
+>BUGS
+>
+>> Never  use  gets().  Because it is impossible to tell without knowing the data in advance how many characters gets() will read, and because gets() will continue to store characters past the end of the buffer, it is extremely dangerous to  use. It has been used to break computer security.  Use fgets() instead.
+>
+>1. Use fgets() instead.
+
+1. 查看fgets()函数具体内容
+
+> SYNOPSIS
+>
+> > char *fgets(char *s, int size, FILE *stream);
+>
+> 1. gets()危险的地方在于函数传参只约定了一个地址，从终端上接收内容，这些内容没有放到指定的地址空间上去，而是放到了输入缓冲区中，只有当用户键入回车键的时候这些内容才会被放到所指定的地址上去，这个输入缓冲区我们是不知道其大小的，因此当我们从键盘或者其他IO设备输入过大的数据时可能会导致数据大小大于输入缓冲区大小，从而导致缓冲区溢出
+> 2. fget()指定输入内容被存放至指针s所指向的地址空间上去，并且最多能接受size个字符，数据是从指定的流stream上来的，返回值char也代表了指针s指向的地址本身
+> 3. fgets()的正常结束有两种情况：
+>     * 读到了size-1个有效字节，剩余的一个字节是留给'\0'的
+>     * 读到了'\n'
+
+3. 我们使用fgets()来读取字符
+
+```markdown
+# define SIZE 5
+
+char buf[SIZE];
+fgets(buf, SIZE, stream);
+
+1. 第一种情况读到size-1个字符
+2. 第二种情况读到'\n'
+
+# 内容是abcdef
+1. 第一次去读的话，buf空间里分别存储的是a b c d '\0'，当前文件中文件的位置指针是定位在字符e，因为下一个要读取的字符为e，即读取size-1=4个字符再加上一个'\0'。
+
+# 内容是ab
+1. 即使是最后一行的内容，句末也会有一个换行符。举一个不是很贴切的例子，windows环境下的word，word一旦打开如果把显示换行标记的设置打开，就会看到新建一个word文档什么还没有输入的时候其实这个word文档就默认有了一个换行符。再比如用vim打开一个文档，只要按一下i进入编辑模式，其实第一行默认就是一个换行符，只不过是没有有效的字符内容罢了，有效的字节和字节是两个概念，很多函数在统计文件大小的时候是统计有效的字符个数，而不是字符个数，即不去统计诸如空格，回车等，这点需要区分。
+2. 如果用fgets(buf, SIZE, stream)去读取内容的时候，buf空间里存储的是a b '\n' '\0'，并且只读取了3个字符，'\0'不能算做读取的字符
+
+# 内容是abcd
+1. 如果用fgets(buf, SIZE, stream)去读取该内容，需要几次读完？
+2. 因为每一次读取都只读取size-1个字符，所以第一次读取内容a b c d 再加一个'\0'，此时的文件位置指针指向的是串尾，即字符d的下一个字符，因为每一行的字符串末尾都有一个换行符'\n'
+3. 第二次读取内容'\n' '\0'
+
+```
+
+还有一个函数叫做puts()
+
+> NAME
+>
+> > fputc, fputs, putc, putchar, puts - output of characters and strings
+>
+> SYNOPSIS
+>
+> > int fputc(int c, FILE *stream);
+> >
+> > int fputs(const char *s, FILE *stream);
+> >
+> > int putc(int c, FILE *stream);
+> >
+> > int putchar(int c);
+> >
+> > int puts(const char *s);
+>
+> 1. int puts(const char *s)：从起始地址开始输出直到遇到'\0'为止
+> 2. int fputs(const char *s, FILE *stream)：把指定的串不一定输出到stdout上，可以输出到任意一个打开的流上去
+>
+> RETURN VALUE
+>
+> > fgets() returns s on success, and NULL on error or when end of file occurs while no characters have been read.
+>
+> 
+
+> 用fgets()和fputs()实现mycpy
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+#define BUFSIZE 1024
+
+int main(int argc, char **argv)
+{
+    FILE *fps, *fpd;
+    char *buf[BUFSIZE];
+
+    if (argc < 3)
+    {
+        fprintf(stderr, "Usage:%s <src_file> <dest_file>\n", argv[0]);
+        exit(1);
+    }
+
+    fps = fopen(argv[1], "r");
+    if (fps == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    fpd = fopen(argv[2], "w");
+    if (fpd == NULL)
+    {
+        perror("fopen()");
+        fclose(fps);
+        exit(1);
+    }
+
+    while (fgets(buf, BUFSIZE, fps) != NULL)
+    {
+        fputs(buf, fpd);
+    }
+
+    fclose(fpd);
+    fclose(fps);
+
+    exit(0);
+}
+
+```
+
+* 9：因为fgets第一个参数需要一个缓冲区间的地址，所以定义一个字符缓冲区间
+* 32-34：读一块写一块，并且需要进行跳出死循环的判断。因为fgets读取成功返回fps指针，读取失败或者读取到文件尾则返回NULL，此时返回的不是EOF
+
+```c
+# result
+
+# ./mycp_fgets /etc/services /tmp/out
+# diff /etc/services /tmp/out
+
+```
+
+* fread()和fwrite()
+
+> NAME
+>
+> > fread, fwrite - binary stream input/output
+>
+> SYNOPSIS
+>
+> > size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+> >
+> > size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
+>
+> 1. size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)：从一个指定的stream流中读取数据并且放到指针ptr所指向的地址空间去，读nmemb个数据对象，每个数据对象大小为size。也就是说ptr这块起始位置的地址总大小为size * nmemb
+> 2. size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)：用const修饰ptr指针表示fwrite函数对源数据只读不写，其余参数同fread
+>
+> 3. 为什么很多人喜欢用这两个函数？
+
+3. 比如有这么一种情况，要实现一个学校的人员数据管理系统，每个学生或老师要存放的数据就是固定那么多，比如姓名、年龄、籍贯......多半时候可以把它抽象成一个定长的结构体。那么把这些数据写到文件中去，那么就可以使用fwrite函数这么做：指针ptr指向元素数据，每个学生数据的结构体大小为size，要往文件stream里写nmemb=100个学生数据，使用fread同理，非常好操作，因此很多人比较倾向于在处理成块的数据时使用这两个函数。但是这两个函数有着致命的缺陷：并没有验证数据边界，比如说学生结构体大小为40个字节，那么每次操作都是在读写40个字节大小数据，这个过程能不能允许数据传输出错的，中间只要有1个字节出错那么整个数据传输过程都会出错。
+
+> RETURN VALUE
+>
+> > On  success,  fread()  and  fwrite()  return the number of items read or written.  This number equals the number of bytes transferred only when size is 1.  If an error occurs, or the end of the file is reached, the return value is a short item count (or zero).
+>
+> 1. return the number of items read or written：如果当前读或者写不够一个对象(nmemb)的话，则当前读或写返回值就为0或者为失败 	
+
+```markdown
+# fread(buf, size, nmemb, fp);
+
+# 1. 假设buf是10个字节大小的char型数组，并且当前文件当中的数据量非常足够，也就是绝对超过10个字节
+# 第一种读取方式
+fread(buf, 1, 10, fp);
+# fread返回值为10，因为能够成功读取10个对象，每个对象大小为1字节
+
+# 第二种读取方式
+fread(buf, 10, 1, fp);
+# fread返回值为1，一个对象大小为10字节
+
+
+# 2. 文件大小只有5个字节
+# 第一种读取方式
+fread(buf, 1, 10, fp); 
+# 文件只有5个字节，也就是说有5个对象存在，那么fread返回值为5，即5个对象
+
+# 第二种读取方式
+fread(buf, 10, 1, fp);
+# 文件大小不够一个读取对象，所以fread返回值为0
+```
+
+fread和fwrite这两个函数只能去执行数据块工工整整的操作，还不太保险，文件位置指针是要稍微偏移一个位置，后面的全部跟着偏移一个位置，fread和fwrite保险起见永远采用单字节来操作，也就是把它当做fgetc和fputc来使用
+
+> 用fread和fwrite实现my_cpy
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+#define BUFSIZE 1024
+
+int main(int argc, char **argv)
+{
+    FILE *fps, *fpd;
+    char buf[BUFSIZE];
+    int n = 0;
+
+    if (argc < 3)
+    {
+        fprintf(stderr, "Usage:%s <src_file> <dest_file>\n", argv[0]);
+        exit(1);
+    }
+
+    fps = fopen(argv[1], "r");
+    if (fps == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    fpd = fopen(argv[2], "w");
+    if (fpd == NULL)
+    {
+        perror("fopen()");
+        fclose(fps);
+        exit(1);
+    }
+
+    while ((n = fread(buf, 1, BUFSIZE, fps)) > 0)
+    {
+        fwrite(buf, 1, n, fpd);
+    }
+
+    fclose(fpd);
+    fclose(fps);
+
+    exit(0);
+}
+```
+
+* 33-36：很多人会把这部分的代码写成如下形式，即读BUFSIZE个对象，写BUFSIZE个对象。这是肯定错误的，因为无法保证用fread函数满打满算读取BUFSIZE个或者BUFSIZE整倍数个的对象，fread也好、fwrite也好，它们的返回值是能正常读取或者写入的对象个数，所以这里应该是读到n个对象，写入n个对象，并且加上判断逻辑
+
+    ```c
+    while (fread(buf, 1, BUFSIZE, fps))
+    {
+        fwrite(buf, 1, BUFSIZE, fpd);
+    }
+    ```
+
+* 10：定义n值
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -7,7 +7,6 @@ int main(int argc, char **argv)
 {
     FILE *fps, *fpd;
     char buf[BUFSIZE];
-    int n = 0;
 
     if (argc < 3)
     {
@@ -30,9 +29,9 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    while ((n = fread(buf, 1, BUFSIZE, fps)) > 0)
+    while (fgets(buf, BUFSIZE, fps) != NULL)
     {
-        fwrite(buf, 1, n, fpd);
+        fputs(buf, fpd);
     }
 
     fclose(fpd);
