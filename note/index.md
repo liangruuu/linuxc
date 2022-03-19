@@ -1369,19 +1369,211 @@ long ftell(FILE *stream);
 >
 > > POSIX.1-2001, POSIX.1-2008, SUSv2.
 
+# 标准IO-getline
 
+没有任何一个现行的函数能够完整地取得一行，因为一定会有大小限制。如果自己去实现这个功能的话该如何实现呢？一个办法是使用动态内存来实现：首先申请一块内存，这块内存有10个字节大小，往这10个字节空间里写数据，当快写满的时候再去申请10个字节大小的空间并以此类推，直到满足空间需求为止，那么这就可以借助malloc一族函数去实现
 
+> NAME
+>
+> SYNOPSIS
+>
+> > #include <stdlib.h>
+> >
+> > void *malloc(size_t size);
+> > void *realloc(void *ptr, size_t size);
+>
+> 1. 首先使用malloc(size_t size)去获得一块内存，然后如果还有需要的话再通过realloc对一块已有的内存进行重复的申请
 
+但为了实现这个功能还有一个更好的方法，就是geline，实际上这个函数就是把刚才说的过程给封装了一遍
 
+> NAME
+>
+> > getline, getdelim - delimited string input
+>
+> SYNOPSIS
+>
+> > #include <stdio.h>
+> >
+> > ssize_t getline(char **lineptr, size_t *n, FILE *stream);
+>
+> 1. ssize_t getline(char **lineptr, size_t *n, FILE *stream)：这个函数实现的功能或者说封装起来的过程就是刚才提到的那样。首先malloc一块空间用一用，不够用了再去扩展以此类推，即第一次用的是malloc，之后用的都是realloc
+>     * char **lineptr：虽然参数类型是二级指针，但是这个参数实际上表示的是一级指针的地址(char\*)\*lineptr
+>     * size_t *n：用malloc申请的内存块的大小，因为要把值回填给n，所以是一个整型数据的地址
+>     * FILE *stream：从stream中读取一行内容
+>
+> DESCRIPTION
+>
+> > getline()  reads  an  entire  line from stream, storing the address of the buffer containing the text into *lineptr.  The
+> > buffer is null-terminated and includes the newline character, if one was found.
+>
+> 2. 把保存文本数据的缓冲区的地址存一级指针lineptr当中去，另外即使给出一个串的起始位置，但依然不知道这块空间有多大，所以用size_t定义的整型值去限制以lineptr指针指向的地址开头空间的整个大小为n。因为要回填存储空间大小，所以size_t *n也不代表一级指针，而代表的是整型数的地址
+>
+> RETURN VALUE
+>
+> > On success, getline() and getdelim() return the number of characters read, including the delimiter character, but not including the terminating null byte ('\0').  This value can be used to handle embedded null bytes in the line read.
+> >
+> > Both functions return -1 on failure to read a line (including end-of-file condition).  In the event of an error, errno is
+> > set to indicate the cause.
+>
+> 
 
+1. 实现：利用getline返回文件中每一行有多少个文件字符
 
+```c
+// getline.c
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
+int main(int argc, char **argv)
+{
 
+    // mtrace();
+    FILE *fp;
+    char *linebuf = NULL;
+    size_t linesize = 0;
 
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <src_file>\n", argv[0]);
+        exit(1);
+    }
 
+    fp = fopen(argv[1], "r");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
 
+    while (1)
+    {
+        if(getline(&linebuf, &linesize, fp) < 0)
+            break;
+        printf("%d\n", strlen(linebuf));
+        printf("%d\n", linesize);
+    }
 
+    fclose(fp);
+
+    
+    exit(0);
+}
+```
+
+* 10-11：两个指针必须初始化，不然会出现段错误
+
+以自定义的makefile文件为例，该文件第一行的字符个数为45个(包括一个换行符\n)，第二航只有一个换行符，所以用`strlen(linebuf)`打印出来的结果就是45和1，但是因为linesize表示的是malloc申请的内存块大小，所以可以看到每次用malloc申请的块大小为120个字节，因为该文文本有两行，所以调用了两次getline函数，因此也相当于调用了2次malloc函数
+
+<img src="index.assets/image-20220319122919133.png" alt="image-20220319122919133" style="zoom:80%;" />
+
+<img src="index.assets/image-20220319123002266.png" alt="image-20220319123002266" style="zoom:80%;" />
+
+当前行数据大小将要超过120字节时，就会调用realloc，内存块大小有可能是120，120...的增长，也有可能是120，60，60...或者其他情况，可以来看一个例子，结果是用malloc申请的内存块大小为240，也就是说当内存块数据快要到达120字节的时候又使用realloc以120字节长度再次申请，即最后使得getline一次申请了240字节大小的内存空间
+
+```shell
+> ./getline /etc/services
+```
+
+<img src="index.assets/image-20220319123709116.png" alt="image-20220319123709116" style="zoom:80%;" />
+
+`getline.c`里的代码其实有一点不妥当，其实这个程序已经造成了可控的内存泄漏，这段程序实现了通过malloc和realloc申请了一段内存空间，但是并没有给出互逆操作：使用malloc函数之后并没有是用诸如free函数来释放掉内存空间，内存泄漏指的是&linebuf的空间没来得及释放掉，其实getline这个函数也没有提供一个比如getlinefree的函数。那为什么说是可控的内存泄漏呢？如果在服务器上运行的程序长时间不能宕机，每一段时间都会产生一点内存泄漏的碎片，那么长此以往就会有问题了，这段程序泄露的只有从lineptr地址开始n大小的空间。
+
+也许会有人想既然存在内存泄露，那么在程序结束的时候加上free函数不就好了吗？理论上是可以的，但是不建议这么做，因为这里写free是以原函数使用malloc为前提的，即知道原函数的封装细节，但是内存动态申请的函数并不是只有malloc和free这一对，还有诸如c++里的new和delete，万一函数里使用的是new，那么就不能用free来释放内存空间了。这里提个醒，在做动态内存分配的时候一定记着提供类似于close、free等释放内存的操作
+
+```markdown
+fclose(fp);
+
+free(linebuf);
+
+exit(0);
+```
+
+* 这里提供一个自己去实现而不是系统提供的getline函数，以为getline是典型的的遵循GNU标准的方言，只存在于libc库中，但是getline在实际生产中具有十分意义的函数，因为没有一个函数能完成取一行，不管这行有多大字节，总能够通过malloc不断扩充而获取到数据
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+// #include<mcheck.h>
+
+// void cleanup(char** pointer) {
+//   free(*pointer);
+//   *pointer = NULL;
+// }
+
+// 自行实现getline函数
+ssize_t mygetline(char **line, size_t *n, FILE *fp)
+{
+    char *buf = *line;
+    // c来存储字符，i来记录字符串长度
+    ssize_t c = 0;
+    ssize_t i = 0;
+
+    // buf为空或n为0时动态分配空间
+    if (buf == NULL || *n == 0)
+    {
+        *line = malloc(10);
+        buf = *line;
+        *n = 10;
+    }
+
+    while ((c = fgetc(fp)) != '\n')
+    {
+        if (c == EOF)
+            return -1;
+        //留2个空间给'\n'和'\0'
+        if (i < *n - 2)
+            *(buf + i++) = c;
+        else
+        {
+            //空间不足,需要扩展空间，重新进行分配
+            *n = *n + 10;
+            buf = realloc(buf, *n);
+            *(buf + i++) = c;
+        }
+    }
+
+    *(buf + i++) = '\n';
+    *(buf + i) = '\0';
+    return i;
+}
+
+int main(int argc, char **argv)
+{
+
+    // mtrace();
+    FILE *fp;
+    char *linebuf = NULL;
+    size_t linesize = 0;
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <src_file>\n", argv[0]);
+        exit(1);
+    }
+
+    fp = fopen(argv[1], "r");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    while (1)
+    {
+        if (mygetline(&linebuf, &linesize, fp) < 0) // if(getline(&linebuf, &linesize, fp) < 0)
+            break;
+        printf("%lu\n", strlen(linebuf));
+        printf("%lu\n", linesize);
+    }
+
+    fclose(fp);
+    free(linebuf);
+    exit(0);
+}
+```
 
 
 
