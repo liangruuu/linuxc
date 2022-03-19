@@ -1685,15 +1685,256 @@ tmpnam其实是有使用上的危险的，危险在于创建一份临时文件�
 
 这个存放结构体指针的数组是存放在进程空间里的，每一个进程都会有这么一个数组，所以下面这幅图表示的是在同一个进程打开的文件状态，所以如果两个进程再打开同一个文件，它们拿到的不是同一个结构体，虽然两个进程对于一个文件进行操作可能会导致互斥等冲突，但这不关结构体的事，这是一式两份的结构体，是分开的，不是多个进程公用的。再比如说同一个文件在一个进程的空间里面打开两次或者是更多的次数，每次打开都会产生一个结构体，并且存放在相应的数组位置上，这时拿到了两个文件描述符，这两个文件描述符都关联的是一个文件，通过文件描述符3和5来操作同一个文件的时候，如果不会出现竞争的话那就不会有什么问题，其实两者如果有协议的话还可以进行一些协同操作。那么如果涉及到close，比如说close数组下标3存放的结构体指针的时候，实际上就是把这块空间设置为空，把对应的结构体释放掉。
 
-还有一种特殊情况，下标4对应的结构体指针打开的是第二个文件，指针就是一个地址值无所谓多少，然后把这个值复制一份放在数组下标为6的位置上，则复制后的指针同样指向的是该结构体的起始位置。现在就出现了数组下标4和下标6存放的指针指向的是同一个结构体，我们刚才针对3，5下标指针指向的结构体的时候说道，close谁就相当于把谁释放掉。而4和6关联的是同一个结构体，如果close4或者6并不会释放掉结构体，因为仅仅关闭掉其中一个指针，这个结构体还是存在的，不然另外一个就成为了野指针，所以一个文件结构体一定会有一个打开计数器来表示当前结构体被几个指针引用到。比如关闭4实际上是相当于给count--，减完之后发现不是0则不执行free；如果4和6都close了，那么计数器值为0，则才会释放掉结构体空间
+还有一种特殊情况，下标4对应的结构体指针打开的是第二个文件，指针就是一个地址值无所谓多少，然后把这个值复制一份放在数组下标为6的位置上，则复制后的指针同样指向的是该结构体的起始位置。现在就出现了数组下标4和下标6存放的指针指向的是同一个结构体，我们刚才针对3，5下标指针指向的结构体的时候说道，close谁就相当于把谁释放掉。而4和6关联的是同一个结构体，如果close4或者6的其中一个并不会释放掉结构体，因为仅仅关闭掉其中一个指针，这个结构体还是存在的，不然另外一个就成为了野指针，所以一个文件结构体一定会有一个打开计数器来表示当前结构体被几个指针引用到。比如关闭4实际上是相当于给count--，减完之后发现不是0则不执行free；如果4和6都close了，那么计数器值为0，则才会释放掉结构体空间
 
 <img src="index.assets/image-20220319195710727.png" alt="image-20220319195710727" style="zoom:80%;" />
 
+# 系统调用IO-read,write,lseek及mycopy的实现
 
+> NAME
+>
+> > read - read from a file descriptor
+>
+> SYNOPSIS
+>
+> > #include <unistd.h>
+> >
+> > ssize_t read(int fd, void *buf, size_t count);
+>
+> 1. ssize_t read(int fd, void *buf, size_t count)：读取一个已经成功打开的文件描述符，把count个字节数据读到buf去，如果成功的话返回的是成功读取到的字节数，如果读到文件尾则返回0，读取失败则返回-1并且设置errno
+>
+> DESCRIPTION
+>
+> > read() attempts to read up to count bytes from file descriptor fd into the buffer starting at buf.
+>
+> RETURN VALUE
+>
+> > On success, the number of bytes read is returned (zero indicates end of file)，On error, -1 is returned, and errno is set appropriately.
+>
+> 
 
+>NAME
+>
+>> write - write to a file descriptor
+>
+>SYNOPSIS
+>
+>> #include <unistd.h>
+>>
+>> ssize_t write(int fd, const void *buf, size_t count);
+>
+>1. ssize_t write(int fd, const void *buf, size_t count)：往已经成功打开的文件fd里写入count个字节的数据，数据来源为buf，注意这里的buf使用const来修饰的，表明消息来源是不能被改动的。返回值如果为0的话表示什么都没写进去，并不是表示出错
+>
+>RETURN VALUE
+>
+>> On success, the number of bytes written is returned.  On error, -1 is returned, and errno is set to indicate the cause of the error.
+>
+>
 
+>NAME
+>
+>> lseek - reposition read/write file offset
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <unistd.h>
+>>
+>> off_t lseek(int fd, off_t offset, int whence);
+>
+>1. off_t lseek(int fd, off_t offset, int whence)：对文件fd进行定位，偏移量为offset，相对偏移位置为whence，同样有SEEK_SET、SEEK_CUR、SEEK_END
+>2. return off_t：返回从文件开始处到当前位置的文件位置指针的距离，或者说所经历的字节个数。也就是说实际上lseek这个函数把fseek和ftell进行综合
 
+* 用以上方法实现mycpy功能
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#define BUFSIZE 1024
+
+int main(int argc, char **argv)
+{
+    int sfd, dfd;
+    char buf[BUFSIZE];
+
+    if (argc < 3)
+    {
+        fprintf(stderr, "Usage:%s <src_file> <dest_file>\n", argv[0]);
+        exit(1);
+    }
+
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if (sfd < 0)
+        {
+            if (errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    } while (sfd < 0);
+
+    do
+    {
+        dfd = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (dfd < 0)
+        {
+            close(sfd);
+            perror("open()");
+            exit(1);
+        }
+    } while (dfd < 0);
+
+    while (1)
+    {
+        len = read(sfd, buf, BUFSIZE);
+        if (len < 0)
+        {
+
+            if (errno == EINTR)
+                continue;
+            perror("read()");
+            break;
+        }
+        if (len == 0)
+            break;
+
+        ret = write(dfd, buf, len);
+        if (ret < 0)
+        {
+            perror("write()");
+            break;
+        }
+    }
+
+    close(dfd);
+    close(sfd);
+
+    exit(0);
+}
+```
+
+* 13：定义两个文件描述符分别代表目标文件和源文件
+* 27、40：打开源文件和目标文件，以只写方式打开目标文件，并且这个文件不一定要存在，如果存在则清空，如果文件打开方式有O_CREAT则必须设置文件权限
+* 51、67：读一块写一块，read函数返回的值为真正读取到的字节数，这里使用变量len接收
+* 43：如果目标文件打开失败的时候源文件是处于打开成功的状态，所以需要手动释放源文件的结构体空间防止内存泄漏
+* 63-69：如果返回值len的值是大于0的话就表示从源文件中读到了len个有效字节，那么就开始写入目标文件
+
+<img src="index.assets/image-20220319215853741.png" alt="image-20220319215853741" style="zoom:80%;" />
+
+之前的文件确实能实现文件的拷贝，但是还存在着一些问题，下面这段代码中假设len读取到了10个字节，那么当使用write函数从buf写10个字节到目标文件中去可能会出现在写过程中存在着遗漏字节数的问题，即读取10个字节，但是只写入3个字节，但是返回的值也不小于0，那么就会进行下一步的read，因此凭空丢了7个字节。所以要在write的时候判断有无把所有字节写入目标文件中去
+
+```c
+while (1)
+{
+    len = read(sfd, buf, BUFSIZE);
+    if (len < 0)
+    {
+
+        if (errno == EINTR)
+            continue;
+        perror("read()");
+        break;
+    }
+    if (len == 0)
+        break;
+
+    ret = write(dfd, buf, len);
+    if (ret < 0)
+    {
+        perror("write()");
+        break;
+    }
+}
+```
+
+更改后的代码：
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#define BUFSIZE 1024
+
+int main(int argc, char **argv)
+{
+    int sfd, dfd;
+    char buf[BUFSIZE];
+
+    if (argc < 3)
+    {
+        fprintf(stderr, "Usage:%s <src_file> <dest_file>\n", argv[0]);
+        exit(1);
+    }
+
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if (sfd < 0)
+        {
+            if (errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    } while (sfd < 0);
+
+    do
+    {
+        dfd = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (dfd < 0)
+        {
+            close(sfd);
+            perror("open()");
+            exit(1);
+        }
+    } while (dfd < 0);
+
+    while (1)
+    {
+        len = read(sfd, buf, BUFSIZE);
+        if (len < 0)
+        {
+
+            if (errno == EINTR)
+                continue;
+            perror("read()");
+            break;
+        }
+        if (len == 0)
+            break;
+
+        ret = write(dfd, buf, len);
+        if (ret < 0)
+        {
+            perror("write()");
+            break;
+        }
+    }
+
+    close(dfd);
+    close(sfd);
+
+    exit(0);
+}
+```
+
+* 16：使用一个循环一直读取到源文件的数据被读取完为止
+* 19：这个时候获取数据的位置并不是从buf的起始位置，而是从buf每次加上一段已读取的地址开始，是之前所有返回值的累加。如第一次写是从buf+0的位置取内容，要写10个字节的数据，假设只写进去3个字节，那么len的值为7，判断大于0，则继续执行write函数，这时是从buf+3的位置开始，还要写len-3=4个字节的数据
 
 
 
