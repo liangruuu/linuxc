@@ -1059,7 +1059,7 @@ int main(void)
 > 3. int sscanf(const char *str, const char *format, ...)：数据来源是一个字符串，其余同理
 > 4. 在scanf一系列的函数中要慎重使用%s这个格式，因为在format部分设置%s，则需要在省略号部分给出地址，但是这一步非常危险，因为在终端输入或者文件取数据的时候是不清楚有待拿的字符串是有多长的，所以依然是看不到目标位置有多大，这是scanf在使用时候最大的缺陷之一
 
-# 标准IO-fseeko和ftell
+# 标准IO-文件位置函数和缓冲区刷新函数
 
 操作文件位置指针
 
@@ -1325,15 +1325,49 @@ int main(int argc, char **argv)
 
 * 行缓冲：换行的时候刷新缓冲区数据、缓冲区满了的时候刷新或者强制刷新(使用fflush)，典型的例子比如说标准输入stdout
 * 全缓冲：缓冲区满了的时候刷新或者强制刷新，只要不是终端设备默认是全缓冲模式，stdout是行缓冲模式就是因为它是终端设备
-* 无缓冲：如stderr，因为一旦出错立马输出，什么条件都不等待，也不等待缓冲区是否满了等情况
+* 无缓冲：需要立即输出的内容，如stderr，因为一旦出错立马输出，什么条件都不等待，也不等待缓冲区是否满了等情况
 
+# 标准IO-fseeko和ftello
 
+刚才我们说过printf和scanf一族函数的缺陷是什么，也说了对于文件位置指针如何使用以及缓冲区的使用方法
 
+包括之前讲到的输入输出函数实际上都会有问题，比如说没有一个函数能够做到从任何一个流中想取多少取多少，如完整的取到一行内容。
 
+文件位置指针定位的几个函数中会存在这么几个问题：fseek和ftell函数"奇丑无比"，这两个函数中的long类型特别的"恶劣"
 
+```c
+int fseek(FILE *stream, long offset, int whence);
 
+long ftell(FILE *stream);
+```
 
+从ftell的角度来分析，它能反映一个文件位置指针的位置，而这个long型是不知道多大的，因为long型在不同的平台上要看字自身机器字长来定义，即使在标准C当中对于类型没有一个严格的定义，比如整型大概一个字长、float和double类型的关系...long型在32位的环境中占32位也就是4个字节，而在ftell函数中没有特殊的说明，那么这就是个有符号的long型，有符号的long型代表着的是(-2^31)~(2^31 - 1)，也就是从-2G~2G - 1。而在ftell函数中不可能反映出文件的位置是一个负值，所以ftell的返回值只能是个正数(0~2G - 1)，所以为了迁就ftell，在fessk当中的offset参数能有正有负，即能够从当前位置向前定义2G，也能从当前位置向后定义2G，那么加起来这个文件有4G大小。但如果结合ftell来看的话，就会发现这个文件压根就不敢达到4G的长度，因为ftell用不了负值部分，所以fseek和ftell共同进行工作的时候就会遇到这样的问题：当前文件大小不会超过2G,也就是只能定义2G大小的文件
 
+> NAME
+>
+> > fseeko, ftello - seek to or report file position
+>
+> SYNOPSIS
+>
+> > #include <stdio.h>
+> >
+> > int fseeko(FILE *stream, off_t offset, int whence);
+> >
+> > off_t ftello(FILE *stream);
+>
+> 1. fseeko和ftello在实现的时候就把刚才说的有争议的两个参数替换为了一个type define过的类型，unix定义的标准名字都是很规范的，什么什么类型都被叫_t，t代表的是type，off_t代表的位数随着机器字长而改变。如果让我们去设计类似于fseek函数的话，其实可以想到把数据类型高度抽象，将来如果这个类型不够用的话那么就可以把另外的一个数据类型放过去就行了
+>
+> DESCRIPTION
+>
+> > On some architectures, both off_t and long are 32-bit types, but defining _FILE_OFFSET_BITS with the value 64 (before including any header files) will turn off_t into a 64-bit type.
+>
+> 2. off_t如果不加上`# define _FILE_OFFSET_BITS 64`声明的话，那么off_t的长度是不是32位是很难说的，是不确定的。如果加上了这个声明，则off_t一定表示的是64位的整型数
+
+既然fseeko和ftello函数中的文件大小已经不受限制了，那么我们是否可以抛弃原来的feek和ftell呢？答案是不能的，因为fseeko和ftello是方言，遵循的是POSIX，而fseek和ftell是遵循C88，C99的，意味着可移植性要好。所以如果文件真的超过2G并且要求可移植性好，那么就只能想别的办法了，而别去使用fseeko和ftello
+
+> CONFORMING TO
+>
+> > POSIX.1-2001, POSIX.1-2008, SUSv2.
 
 
 
