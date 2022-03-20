@@ -2078,8 +2078,6 @@ while()
 > 1. int truncate(const char *path, off_t length)：把一个未打开的文件path截断到length长度
 > 2. int ftruncate(int fd, off_t length)：把一个已打开的文件fd截断到length长度大小，第10行的长度是由第11行之前的文件大小减去第10行之前的文件大小，所以截断之后的文件大小就是源文件大小减去第10行数据，的大小
 
-
-
 目前实现删除行操作需要4个系统调用，我们能否从文件共享的角度来解决这个问题，即多个任务共同操作一个文件或者协同完成任务，我们用文件共享的思路来重构之前的代码，伪代码如下所示：
 
 ```c
@@ -2107,21 +2105,172 @@ process2->open->r+
 p1->read -> p2->write
 ```
 
+# dup，dup2和原子操作
 
+原子：不可分割的最小单位，原子操作也被称为不可分割的操作，如果一些操作可以分割，则会造成竞争，所以原子操作的作用就是解决竞争和冲突问题。
 
+之前介绍过一个函数名为`char *tmpnam(char *s)`，它是用来创建一个临时文件，但是函数参数是一个文件名而不是一个可以直接打开的文件，它的作用是给一个文件名，然后一定会用到诸如create、fopen等函数去创建这个文件。其他进程或线程可以中间"插一脚"：在A进程中分配的名字还没来得及去创建，时间片就耗尽了，进程B也拿到同样的文件名先去创建文件，等A拿到时间片后创建文件的时候就会覆盖进程B的一些列对文件的操作，这就是典型的竞争的特点，出现竞争的原因在于两步操作并不原子。假如说操作原子化之后，那么几个步骤就会成为不可分割的单位，拿到文件名就马上去常见对应的文件，这两步是一气呵成的，进程的状态要么是既没拿到文件名也没创建文件，要么就是拿到了文件名并且已经创建了对应的文件，中间不会让其他进程或线程"插一脚"
 
+* 实现功能：在给定条件下，把一个字符串输入到指定的文件当中，而不是输出到终端stdout上，这个条件是：程序中必须包含注释下面的代码，文件目录指定为'/tmp/out'
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
 
+# define FNAME /tmp/out
 
+int main()
+{
 
+    
+    // *********************
+    putc("hello!");
+    
+    exit(0);
+}
 
+```
 
+puts函数是定死的，是一定会向终端stdout上输出的，这里提一句：stdout的文件描述符为1，这个1也就是puts函数的走向。如果注释下面的内容不许变，转而在注释上方做手脚的话，就意味着需要对文件描述符1做一个重定向，用shell语言来描述的就是
 
+````shell
+echo 1 > /...
+````
 
+而文件描述符的特点是优先使用当前可用范围里最小的内容
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+# define FNAME /tmp/out
 
+int main()
+{
 
+    close(1);
+    
+    fd = open(FNAME, "O_WRONLY|O_CREAT|O_TRUNC,0600");
+    if(fd < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    
+    
+    
+    
+    // *********************
+    putc("hello!");
+    
+    exit(0);
+}
+
+```
+
+* 13-15：首先关闭1号文件描述符，然后马上调用open函数打开给定的文件，并且用一个文件描述符fd来接收，因为文件描述符的特点是优先使用当前可用范围里最小的内容，所以按道理来讲打开的文件就会占据1号空间
+* 16-20：如果打开失败则报错结束
+
+<img src="index.assets/image-20220320140932554.png" alt="image-20220320140932554" style="zoom:80%;" />
+
+有一个函数dup可以实现上面的功能
+
+>NAME
+>
+>> dup, dup2, dup3 - duplicate a file descriptor
+>
+>SYNOPSIS
+>
+>> #include <unistd.h>
+>>
+>> int dup(int oldfd);
+>> int dup2(int oldfd, int newfd);
+>
+>1. int dup(int oldfd)：dup会使用当前可用范围内最小的文件描述符作为新的文件描述符，功能是复制一个文件描述符然后放到当前可用范围内最小的位置上去
+>
+>DESCRIPTION
+>
+>> The  dup()  system call creates a copy of the file descriptor oldfd, using the lowest-numbered unused file descriptor for the new descriptor.
+>
+>
+>
+
+1. 用dup函数改写之前的代码
+
+```c
+void mydup2()
+{
+    int fd;
+    fd = open(FNAME, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    //以下三句实现输出重定向
+    close(1);
+    // 非原子操作
+    dup(fd);
+    close(fd);
+    
+	//************************************
+    puts("Hello you!");
+}
+```
+
+* 20-21：在创建完fd之后再关闭1号文件描述符，fd相当于函数参数里的oldfd，把fd复制一个副本放到当前可用范围里最小的位置上
+* 22：因为经过dup复制之后有两个指针指向同一个结构体，所以现在可以释放其中一个，即原来的fd。那么其实现在就剩下1号描述符，这个描述符关联的是制定的文件而不再是stdout了
+
+下图显示了如果原本有文件描述符4，现在的数组情况是0~5号位置都被占用，此时对4号描述符执行dup操作然后只能把副本描述符放到6号位置上，此时4号和6号实际上指向的是同一个结构体，所以现在通过4号或者6号操作的是同一个结构体里的属性
+
+<img src="index.assets/image-20220320141848536.png" alt="image-20220320141848536" style="zoom:80%;" />
+
+代码写到这里，我会告诉你之前的那段代码是错误的。错误的原因有两点：1. 假设一个系统里没有1号文件描述符，那么第一次使用open函数产生的fd的值就是1，然后调用close函数把1号关闭了，这个文件相当于是释放了，那么dup(fd)中的fd相当于是dup了一个不存在的fd，这就明显出错了；2. 因为linux是面向多进程并发的，假设还有一个进程或线程在调用fopen函数，并且AB进程共用同一个文件描述符表，那么当执行close刚把1号文件关闭的时候，还没来得及dup复制，那么可能是进程B抢到了这个1号描述符，此时进程A只能获取到除1号描述符之外的描述符，那么puts就会输出到别的文件当中去了。
+
+产生第二个问题的原因在于close和dup这两步操作不原子，是非原子操作。那么dup2就是来解决这个操作不原子的问题的
+
+>SYNOPSIS
+>
+>> int dup2(int oldfd, int newfd)
+>
+>1. int dup2(int oldfd, int newfd)：把newfd作为oldfd的一个副本，如果newfd被占用的话，就会先关闭newfd，然后把oldfd的副本放到newfd的位置上去
+>    
+
+1. 并且dup2不会出先刚才说的第一个问题
+
+>DESCRIPTION
+>
+>> If oldfd is a valid file descriptor, and newfd has the same value as oldfd, then  dup2()  does  nothing,  and  returns newfd.
+>
+>如果oldfd和newfd是同一个文件描述符，则dup2什么都不做并且返回当前的newfd本身。换句话说，如果newfd本身是1的话，那么dup2什么都不做，也不把1号关闭
+
+```c
+void mydup3()
+{
+    int fd;
+    fd = open(FNAME, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    // dup2实现原子操作
+    dup2(fd, 1);
+    if (fd != 1)
+        close(fd);
+
+    // *********************
+    puts("Hello you.......!");
+}
+```
+
+* 12-13：因为dup2函数的性质不会关闭新老描述符相同的描述符，所以为了避免用户自己关闭fd，所以需要加上一个判断逻辑
+
+<img src="index.assets/image-20220320144335286.png" alt="image-20220320144335286" style="zoom:80%;" />
 
 
 
