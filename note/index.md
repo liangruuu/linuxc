@@ -2669,6 +2669,90 @@ d
     ....
 ```
 
+# 文件属性和FAT文件系统
+
+文件在创建包括在终端上touch一个空文件的时候，文件属性应满足公式：`0666 & ~umask`。umask是一条命令，直接在终端回车就能看到当前umask的内容是多少，如果要更改umask值的话就可以直接在终端操作，umask机制的存在就是为了防止产生权限过松的文件
+
+```shell
+> umask
+
+# result
+0002
+
+> umask 0022
+# result
+0022
+```
+
+umask指令其实涉及到一个名也叫umask的函数
+
+>NAME
+>
+>> umask - set file mode creation mask
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <sys/stat.h>
+>>
+>> mode_t umask(mode_t mask);
+>
+>1. umask指令就是按照umask函数封装而成的，如果想在进程当中设置umask值的话就调用这个函数，umask指令是用不了了的
+
+文件权限的更改和管理：
+
+1. chmod(change mode)
+2. fchmod(file change mode)
+
+chmod可以改变文件的权限，那么有可能在一个进程中操作文件的时候需要临时改变文件的权限信息，比如说需要在文件中调用一个脚本，因此需要改变文件权限，则有一个函数能实现这个功能
+
+>NAME
+>
+>> chmod, fchmod, fchmodat - change permissions of a file
+>
+>SYNOPSIS
+>
+>> #include <sys/stat.h>
+>>
+>> int chmod(const char *pathname, mode_t mode);
+>> int fchmod(int fd, mode_t mode);
+>
+>1. int chmod(const char *pathname, mode_t mode)：pathname是指定文件，mode指定所赋权限值是什么
+>2. int fchmod(int fd, mode_t mode)：跟chmod很像，只不过第一个参数变成了文件描述符，即针对某一个成功打开的文件更改权限
+
+粘住位(t位)：
+
+给某一个可执行的二进制命令设置当前t位，设置t位的作用是保留某一个命令的使用痕迹，为的是下次在装载模块的时候比较快，即在内存当中保留它的使用痕迹。但这个粘住位现在已经无所谓了，因为有了page cache的设计，本来常用的数据块就会保留在内存当中，现在常用的是给目录设置这个t位。目前常用到的有t位设计的目录就是在根目录下的tmp目录，目录设置了t位之后，各个用户对于该目录以及目录中文件的操作就会特殊化了
+
+```shell
+> ls -l /
+
+# result
+drwxrwxrwt  24 root root       4096 Mar 21 10:02 tmp
+```
+
+文件系统FAT：了解文件和目录的具体关系
+
+文件系统其实就是文件或数据的存储格式问题，来帮助和管理存储文件以及数据，FAT和UFS文件系统都是同一时期的产物，区别在于一个不开源、一个开源
+
+FAT文件系统的本质是一个静态存储的单链表，一说到静态首先就想到使用数组来实现的，用数组是能实现一个单链表的。用数组来表示的话，链表当中的每一个节点肯定都是用下标的方式来指示下一个节点的内容
+
+```c
+struct{
+    int next[N];	// 整型值用来表示下一个值的下标
+    char data[N][size];
+}
+```
+
+我们用一张图来表示这个链表：当前假设N为9，上面这块区域表示next域，每一块空间表示一个int类型；下面这块区域表示data域，每一快空间表示一个char [size]. 有一个文件的具体数据占了data域的其中一个数据块，文件节点存储的是next域中的其中一个下标值，比如说占用了下标1，下标1对应的空间存储的是^值，那么表示当前文件结束了，只占用了data域中的一块空间。那么当要获取数据的时候只需要通过data[1]去找到对应的数据
+<img src="index.assets/image-20220321104730092.png" alt="image-20220321104730092" style="zoom: 67%;" />
+
+如果文件过大，一个data数据块存放不下的话，则会在data域中占用多个数据块，对应的next[1]中存放的不再是^，而是下一个next块的下标，直到在next块中存放^。因此如果有一个节点信息能够拿到一个文件的话，就可以通过next域中的值拿到对应的data域中的值。这个就是FAT文件系统
+
+<img src="index.assets/image-20220321105645404.png" alt="image-20220321105645404" style="zoom: 80%;" />
+
+
+
 
 
 
