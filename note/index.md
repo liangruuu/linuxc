@@ -2757,6 +2757,143 @@ UFS文件系统详见操作系统文件章节
 
 <img src="index.assets/image-20220321130002390.png" alt="image-20220321130002390" style="zoom:80%;" />
 
+# 链接文件和目录操作
+
+目录项是存在于目录文件当中的，目录文件大家有可能在无意中看到过其中一部分：一个目录本来应该执行cd指令，但是误操作执行了vim指令，即用vim打开了一个目录文件，这时拿到的文件内容是当前目录下所有的文件，这其实就是目录文件中的一部分内容
+
+```shell
+> vim code/
+
+# result
+
+" Netrw Directory Listing                                        (netrw v165)
+"   /home/liangruuu/study/linuxc/code
+"   Sorted by      name
+"   Sort sequence: [\/]$,\<core\%(\.\d\+\)\=\>,\.h$,\.c$,\.cpp$,\~\=\*$,*,\.o$,\.obj$,\.info$,\.swp$,\.bak$,\~$
+"   Quick Help: <F1>:help  -:go up dir  D:delete  R:rename  s:sort-by  x:special
+" ==============================================================================
+../                                                                                                                                                      
+./
+fs/
+io/
+```
+
+既然谈到目录项了，就来说说一下硬链接和符号链接，我们使用/tmp目录进行实验，bigfile文件的inode号为286980
+
+```shell
+> stat/tmp/bigfile
+
+# result
+
+File: bigfile
+Size: 5368709120	Blocks: 8          IO Block: 4096   regular file
+Device: 805h/2053d	Inode: 286980      Links: 1
+Access: (0600/-rw-------)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-21 08:54:00.312073392 +0800
+Modify: 2022-03-21 08:38:38.119307229 +0800
+Change: 2022-03-21 08:38:38.119307229 +0800
+Birth: -
+```
+
+给bigfile文件做一个硬链接，结果可以看到刚才文件的硬链接数为1，执行了ln指令后的硬链接数变为了2，并且bigfile_link文件的inode号与之前文件的inode号一致
+
+```shell
+# ln source destination
+> ln bigfile bigfile_link
+> stat /tmp/bigfile
+
+# result
+File: bigfile
+Size: 5368709120	Blocks: 8          IO Block: 4096   regular file
+Device: 805h/2053d	Inode: 286980      Links: 2
+Access: (0600/-rw-------)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-21 08:54:00.312073392 +0800
+Modify: 2022-03-21 08:38:38.119307229 +0800
+Change: 2022-03-21 17:17:33.165533913 +0800
+Birth: -
+
+> stat /tmp/bigfile_link
+
+# result
+File: bigfile_link
+Size: 5368709120	Blocks: 8          IO Block: 4096   regular file
+Device: 805h/2053d	Inode: 286980      Links: 2
+Access: (0600/-rw-------)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-21 08:54:00.312073392 +0800
+Modify: 2022-03-21 08:38:38.119307229 +0800
+Change: 2022-03-21 17:17:33.165533913 +0800
+Birth: -
+
+```
+
+所以硬链接数是目录项的同义词，所以刚才执行`ln bigfile bigfile_link`实际上就是在当前目录下的目录文件中多写了一行，使另外一个文件也关联当前inode信息，特别像两个指针指向同一个地址空间，如果把bigfile源文件删除，那么bigfile_link文件仍然能够正常使用，只不过硬链接数减1
+
+```markdown
+# /tmp
+
+-rw------- 2 liangruuu liangruuu 5368709120 Mar 21 08:38 bigfile
+-rw------- 1 liangruuu liangruuu 5368709120 Mar 21 08:55 bigfile.bck
+-rw------- 2 liangruuu liangruuu 5368709120 Mar 21 08:38 bigfile_link
+```
+
+而符号链接特别像windows环境下的快捷方式，它所指向的是一个目标文件，源文件跟符号链接文件是两个独立的文件，各自有各自的属性
+
+```shell
+> ln -s bigfile bigfile_s
+
+# result
+
+File: bigfile_s -> bigfile
+Size: 7         	Blocks: 0          IO Block: 4096   symbolic link
+Device: 805h/2053d	Inode: 288707      Links: 1
+Access: (0777/lrwxrwxrwx)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-21 17:28:00.724331678 +0800
+Modify: 2022-03-21 17:27:52.984348315 +0800
+Change: 2022-03-21 17:27:52.984348315 +0800
+Birth: -
+
+```
+
+上面的一行指令创建了bigfile文件的符号链接文件，此文件的inode号与源文件不一致，并且不增加硬链接数，Size值也只有7(这个7个字节是bigfile文件名的长度)，在当前环境下符号链接文件所占磁盘块数为0块，如果此时删除bigfile源文件，则符号链接的指向已经就是非法的了，此时如果按照bigfile_s来引用的话一定会出错的。并且如果用-l命令查看文件的话，权限位第一位就会用符号l来表示该文件是符号链接文件
+
+<img src="index.assets/image-20220321173312128.png" alt="image-20220321173312128" style="zoom:80%;" />
+
+>NAME
+>
+>> link, linkat - make a new name for a file
+>
+>SYNOPSIS
+>
+>> #include <unistd.h>
+>>
+>> int link(const char *oldpath, const char *newpath);
+>
+>1. int link(const char *oldpath, const char *newpath)：link函数封装出的命令就是ln
+
+>NAME
+>
+>> unlink, unlinkat - delete a name and possibly the file it refers to
+>
+>SYNOPSIS
+>
+>> #include <unistd.h>
+>>
+>> int unlink(const char *pathname);
+>
+>1. int unlink(const char *pathname)：从磁盘上的pathname路径中删除链接
+
+1. 这个文件最终有无被删除是不清楚的，因为使用rm命令删除文件，前提条件是文件的硬链接数为0，然后没有任何进程在打开这个文件，那么对应的数据空间才会被释放。如果删除被硬链接指向的文件，只是意味着硬链接数减1，当硬链接计数减为0的时候空间才会被释放。unlink可以非常方便地产生一个匿名文件，之前提过的两个函数：tmpnam、tmpfile，他们两个的作用就是用来创建临时文件的，unlink是另外一种常见的方式。设置一个可用的文件名并且用open函数打开，从而获得一个文件描述符，然后马上执行unlink函数，把这个文件从磁盘上删除，但是这个文件并没有被直接释放，因为提前用open打开了一个文件描述符，直到执行完close函数关闭了对应的文件描述符为止，这个数据块才被真正地释放掉
+
+
+
+
+
+
+
+
+
+
+
 
 
 
