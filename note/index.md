@@ -2294,11 +2294,380 @@ void mydup3()
 
 3. 进程环境
 
+# stat
+
+> NAME
+>
+> > stat, fstat, lstat, fstatat - get file status
+>
+> SYNOPSIS
+>
+> > #include <sys/types.h>
+> > #include <sys/stat.h>
+> > #include <unistd.h>
+> >
+> > int stat(const char *pathname, struct stat *statbuf);
+> > int fstat(int fd, struct stat *statbuf);
+> > int lstat(const char *pathname, struct stat *statbuf);
+>
+> 1. int stat(const char *pathname, struct stat *statbuf)：pathname为想要获得属性的文件名，把获得的属性值填入statbuf这个缓冲区中，成功返回为0，失败则返回为-1并且生成errno
+>
+> 
+
+1. 在unix世界中很多函数的封装是沿用一个规律的，stat函数通过一个文件名获取文件属性。而fstat函数不是通过文件名而是通过一个已经打开的文件描述符。而lstat函数还是做相同的事情，但是和stat函数在链接文件的处理上略有不同。很多函数的命名规则都是像刚才的三个函数一样
+
+    statbuf结构体的具体内容为：
+
+    ```c
+    struct stat {
+        dev_t     st_dev;         /* ID of device containing file */
+        ino_t     st_ino;         /* Inode number */
+        mode_t    st_mode;        /* File type and mode */
+        nlink_t   st_nlink;       /* Number of hard links */
+        uid_t     st_uid;         /* User ID of owner */
+        gid_t     st_gid;         /* Group ID of owner */
+        dev_t     st_rdev;        /* Device ID (if special file) */
+        off_t     st_size;        /* Total size, in bytes */
+        blksize_t st_blksize;     /* Block size for filesystem I/O */
+        blkcnt_t  st_blocks;      /* Number of 512B blocks allocated */
+        ......
+    }
+    ```
+
+    其实也有个stat指令，这个指令其实就是用stat函数封装出来的
+
+    ```shell
+    > stat README.md
+    
+    # result 
+    File: README.md
+    Size: 8               Blocks: 8          IO Block: 4096   regular file
+    Device: 805h/2053d      Inode: 540989      Links: 1
+    Access: (0664/-rw-rw-r--)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+    Access: 2022-03-16 16:25:58.268497154 +0800
+    Modify: 2022-03-16 16:08:32.859523443 +0800
+    Change: 2022-03-16 16:08:32.859523443 +0800
+    Birth: -
+    ```
+
+    同时我们来看下ls指令对于同一个文件所展示的信息，就会发现其实ls指令其实就是挑选了stat结构体中的几个属性显示
+
+    ```shell
+    > ls README.md -l
+    
+    # reuslt
+    -rw-rw-r-- 1 liangruuu liangruuu 8 Mar 16 16:08 README.md
+    ```
+
+* 使用程序验证stat结构体里的属性值，以st_size为例
+
+```c
+// fsize.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static off_t fsize(const char *fname)
+{
+    struct stat statres;
+    if (stat(fname, &statres) < 0)
+    {
+        perror("stat()");
+        exit(1);
+    }
+
+    return statres.st_size;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <filename>\n", argv[0]);
+    }
+
+    printf("file size:%ld\n", fsize(argv[1]));
+    exit(0);
+}
+
+```
+
+* 9：因为对于fname指向的文件是只读不写的，所以严谨一点需要用const修饰；一定要注意的是st_size的值为off_t，所以fsize函数的返回值不能为int而应该是off_t
+* 11-16：需要一个结构体statres来存放当前文件的属性，返回值表示是否成功
+
+```markdown
+# ./fsize fsize.c 
+
+# reuslt
+# file size:478
 
 
+# stat fsize.c
+File: fsize.c
+Size: 478             Blocks: 8          IO Block: 4096   regular file
+Device: 805h/2053d      Inode: 679626      Links: 1
+Access: (0664/-rw-rw-r--)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-20 22:20:38.480888846 +0800
+Modify: 2022-03-20 22:13:44.241058653 +0800
+Change: 2022-03-20 22:13:44.241058653 +0800
+Birth: -
+```
+
+# 空洞文件
+
+我们再来看下stat结构体，其中有三个属性，有很多人人为这三个属性的关系是st_size = st_blksize * st_blksize，但其实不是这样的。不要拿windows里的概念与linux里的概念进行一对一类比，在windows中一个size值实际上就代表一个文件所占磁盘数，但在linux世界中不是这样的，这根文件系统有关系，在linux世界中size值跟其他属性一样只不过是一个属性而已，而st_blksize和st_blocks才真正决定了一个文件所占磁盘大小
+
+```c
+off_t     st_size;        /* Total size, in bytes */
+blksize_t st_blksize;     /* Block size for filesystem I/O */
+blkcnt_t  st_blocks;      /* Number of 512B blocks allocated */
+```
+
+我们用`stat`指令来观察一个文件的信息，fsize.c文件所占磁盘块数为8块，而一块占512B，那么这个文件所占磁盘块大小为4096B，与下面所展示信息一致，但是如果用size来表示的话就是478字节。不要觉得这种情况很奇怪，其实有种情况下是文件非常大，即size非常大，但是所占磁盘空间非常小，也即跟block相关的数据很小，这就是所谓的空洞文件
+
+```markdown
+# > stat fsize.c
+
+File: fsize.c
+Size: 478             Blocks: 8          IO Block: 4096   regular file
+Device: 805h/2053d      Inode: 679626      Links: 1
+Access: (0664/-rw-rw-r--)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-20 22:20:38.480888846 +0800
+Modify: 2022-03-20 22:13:44.241058653 +0800
+Change: 2022-03-20 22:13:44.241058653 +0800
+Birth: -
+```
+
+* 实现空洞文件
+
+```c
+// big.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+// ls -l file     查看文件逻辑大小
+
+// du -c file     查看文件实际占用的存储块多少
+
+// od -c file     查看文件存储的内容
+
+int main(int argc, char **argv)
+{
+    int fd;
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <filename>\n", argv[0]);
+        exit(1);
+    }
+
+    fd = open(argv[1], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    // extend the size of file
+    lseek(fd, 5LL * 1024LL * 1024LL * 1024LL - 1LL, SEEK_SET);
+    // write '\0' to end file
+    write(fd, "", 1);
+    close(fd);
+
+    exit(0);
+}
+
+```
+
+* 32：使用lseek函数让文件指针从SEEK_SET位置开始移动5G大小，这一片区域全部用'\0'填充；计算机里的世界中，跟数理化是一样的，没有单位的数值是没有意义的，所以这里的5 * 1024 * 1024 * 1024被默认当做整型数据来看，但是整型也分很多种，比如int、short、long...这里被当做一个有符号的int类型，那么现在数据已经溢出了，从而得不到正常的数值，所以我们需要放大数据类型让其变为long long类型的数据
+* 34：往文件当中写入一个尾0，如果不发生这次系统调用，那么当前文件是不占空间的；
+
+```markdown
+# > ./big /tmp/bigfile
+# ls -l /tmp/bigfile
+
+# result
+-rw------- 1 liangruuu liangruuu 5368709120 Mar 21 08:38 /tmp/bigfile
+```
+
+结果可以看到bigfile文件的大小为5G，再使用stat指令来观察文件信息，结果可以看到一个5G大小的文件在当前环境下所占磁盘空间为4K
+
+```shell
+> stat /tmp/bigfile 
+
+File: /tmp/bigfile
+Size: 5368709120      Blocks: 8          IO Block: 4096   regular file
+Device: 805h/2053d      Inode: 286980      Links: 1
+Access: (0600/-rw-------)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-21 08:38:38.119307229 +0800
+Modify: 2022-03-21 08:38:38.119307229 +0800
+Change: 2022-03-21 08:38:38.119307229 +0800
+Birth: -
+```
+
+我们再进行一个操作：拷贝bigfile文件。我们在生活当中肯定做过文件的拷贝，也清楚拷贝一个5GB大小的文件大概需要多久，不是4、5秒就能拷贝完成的了的，如果我们按照之前写过的mycpy程序来做这样一个操作的话，那么还真就是实打实的拷贝5G个字节，这跟用U盘拷贝一个5G大小的文件所用时间其实应该是没有多大区别的。可是现在我们调用cp指令结果发现只需要不到5秒就执行完拷贝操作
+
+```shell
+> cp /tmp/bigfile /tmp/bigfile.bck
+
+> stat /tmp/bigfile.bck
+
+# result
+
+File: /tmp/bigfile.bck
+Size: 5368709120      Blocks: 0          IO Block: 4096   regular file
+Device: 805h/2053d      Inode: 287079      Links: 1
+Access: (0600/-rw-------)  Uid: ( 1000/liangruuu)   Gid: ( 1000/liangruuu)
+Access: 2022-03-21 08:55:33.036621827 +0800
+Modify: 2022-03-21 08:55:33.036621827 +0800
+Change: 2022-03-21 08:55:33.036621827 +0800
+Birth: -
+```
+
+cp指令是支持空洞文件拷贝的，它在把原文件拷贝到目标文件的时候是这么做的：大概的实现跟我们之前写的mycpy逻辑类似，读一块写一块，但是读一块，在写之前判断所读数据如果全都是空字符的话，则不执行write操作，而去记录长度，以此类推，不停地读取判断，然后发现这5G个字节没有一个有效字节，则把源文件全部读取完之后没有执行一次write操作，相当于lseek操作把位置指针一下子扯到了文件尾，那么拿到的就是一个5G长度的文件。在上一段程序中我们在最后添加了一个write操作就是为了执行一次write操作，write操作是不知道写入的是有效字符还是空字符。所以需要改变一下观念：在linux环境下，size值只是一个属性而已，而windows不一样
+
+# 文件属性
+
+stat结构体中还有一个属性需要强调一下：st_mode
+
+```markdown
+mode_t st_mode
 
 
+# -rw-rw-r-- 1 liangruuu liangruuu 342 Mar 21 08:38 /xxx/yyy
+```
 
+其表示的是文件权限所存放的位置，st_mode是以一个位图的形式存放的，mode_t是一个16位的整型数，我们来观察表示文件权限信息的字段，基本位有9位再加上一个u+s位再加上g+s位再加上粘住位，然后文件类型有7种，而7种文件类型用3个二进制位来表示，总共加起来一共15位，但是没有15位的整型数，所以用16位来表示
+
+st_mode由两部分组成：文件类型和文件权限
+
+文件类型分为：dcb-lsp
+
+* d：directory(目录文件)
+* c：character(字符设备文件)
+* b：block(块设备文件)
+* -：regular(常规文件)
+* l：link(符号链接文件)
+* s：socket(网络套接字文件)
+* p：pipe(匿名管道文件)
+
+```markdown
+# 当前系统环境提供了这么几个宏，恰好是用来测试文件类型的
+# 把st_mode作为参数传入宏种，如果成立返回真，如果失败返回假
+
+S_ISREG(m)  is it a regular file?
+
+S_ISDIR(m)  directory?
+
+S_ISCHR(m)  character device?
+
+S_ISBLK(m)  block device?
+
+S_ISFIFO(m) FIFO (named pipe)?
+
+S_ISLNK(m)  symbolic link?  (Not in POSIX.1-1996.)
+
+S_ISSOCK(m) socket?  (Not in POSIX.1-1996.)
+```
+
+* 做个小实验来验证st_mode
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+static int ftype(const char *fname)
+{
+    struct stat statres;
+    if (stat(fname, &statres) < 0)
+    {
+        perror("stat()");
+        exit(1);
+    }
+
+    if (S_ISREG(statres.st_mode))
+        return '-';
+    else if (S_ISDIR(statres.st_mode))
+        return 'd';
+    else if (S_ISSOCK(statres.st_mode))
+        return 's';
+    else
+        return '?';
+}
+
+int main(int argc, char **argv)
+{
+    int fd;
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <filename>\n", argv[0]);
+        exit(1);
+    }
+
+    printf("%c\n", ftype(argv[1]));
+
+    close(fd);
+    exit(0);
+}
+
+```
+
+* 8：因为文件类型是7个字符，所以理所应当ftype函数返回值为char，但是不推荐使用char这个数据类型，因为char型是没有那么安全的，有无对应的符号其实是不知道的，但是每个字符都对应着一个int型数据，所以更推荐用int来替代
+
+```shell
+> ./ftype ../fs
+
+# result 
+d
+```
+
+我们可以通过宏来判断st_mode的值，还有另外一种用数字表示的方式，st_mode是16位的整型数，它是以8进制的形式表示，以0170000为例，第一位0表示8进制数，70000一共15位，再加上1对应的1位，一共16位，并且17表示的是高4位的1111。高4位为1100的时候表示的是socket文件，高4位是1010的时候表示的是符号链接文件....如果让st_mode按位与上如下宏的话，因为按位与是同位全为1结果才是1，所以结果是保留了st_mode的高四位，其他位全是0，最后再让按位与之后的st_mode值与这些宏作对比的话就能确定是哪种类型的文件。同理低三位表示other用户的权限，次第三位表示group用户的权限，再往前推三位表示所有者的权限。第10位表示粘住位(sticky bit)，第11位表示g+s位(set-group-ID bit)，第13位表示u+s位(set-user-ID bit)
+
+```markdown
+    S_IFMT     0170000   bit mask for the file type bit field
+
+    S_IFSOCK   0140000   socket
+    S_IFLNK    0120000   symbolic link
+
+    S_IFREG    0100000   regular file
+    S_IFBLK    0060000   block device
+    S_IFDIR    0040000   directory
+    S_IFCHR    0020000   character device
+    S_IFIFO    0010000   FIFO
+
+
+    S_ISUID     04000   set-user-ID bit (see execve(2))
+    S_ISGID     02000   set-group-ID bit (see below)
+    S_ISVTX     01000   sticky bit (see below)
+
+    S_IRWXU     00700   owner has read, write, and execute permission
+    S_IRUSR     00400   owner has read permission
+    S_IWUSR     00200   owner has write permission
+    S_IXUSR     00100   owner has execute permission
+
+    S_IRWXG     00070   group has read, write, and execute permission
+    S_IRGRP     00040   group has read permission
+    S_IWGRP     00020   group has write permission
+    S_IXGRP     00010   group has execute permission
+
+    S_IRWXO     00007   others  (not  in group) have read, write, and
+    execute permission
+    S_IROTH     00004   others have read permission
+    S_IWOTH     00002   others have write permission
+    S_IXOTH     00001   others have execute permission
+
+    ....
+```
 
 
 
