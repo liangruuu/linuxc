@@ -41,6 +41,7 @@ int main()
 
     // for (i =LEFT; i <= RIGHT; i++)
     //     wait(NULL);
+    // sleep(1000);
 
     exit(0);
 }
