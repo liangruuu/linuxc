@@ -918,7 +918,7 @@ wait函数是没有指向的，即参数中并没有指定回收哪个子进程�
 
 * options是一个位图
 
-* WNOHANG：如果添加了WNOHANG选项的话，即使当前没有子进程结束运行退出，也要立即退出，相当于WNOHANG选项把waitpid这个操作从阻塞变为非阻塞。wait操作死等收一个子进程的尸然后发现返回值，才能直到回收的是哪个子进程；waipid中如果options字段为0就相当于wait操作，如果options字段不为空，比如说是WNOHANG，那么如果指定进程仍在运行也会立刻返回不死等，如果确实已经结束了才会回收子进程。只有在子进程状态发生变化的时候才能执行收尸操作取出退出码然后释放资源，一个进程如果在正常运行是无法收尸的，有了options字段waitpid函数可以是非阻塞的，但是wait函数一定是阻塞的
+* WNOHANG：如果添加了WNOHANG选项的话，即使当前没有子进程结束运行退出，也要立即退出，相当于WNOHANG选项把waitpid这个操作从阻塞变为非阻塞。wait操作死等并且收一个子进程的尸然后发现返回值，才能知道回收的是哪个子进程；waipid中如果options字段为0就相当于wait操作，如果options字段不为空，比如说是WNOHANG，那么如果指定进程仍在运行也会立刻返回不死等，如果确实已经结束了才会回收子进程。只有在子进程状态发生变化的时候才能执行收尸操作取出退出码然后释放资源，一个进程如果在正常运行是无法收尸的，有了options字段waitpid函数可以是非阻塞的，但是wait函数一定是阻塞的
 
 >DESCRIPTION
 >
@@ -1171,23 +1171,357 @@ liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./primerN
 
 可以看到所拿数值是3的倍数的第一个子进程永远拿不到任何质数
 
+# exec函数族
+
+在这个阶段需要记住一个单词：few(fork+exec+wait)，这三个函数搭建起了整个unix框架
+
+一个进程产fork一个子进程，这个子进程由又fork出来一个子进程的时候，是通过复制父进程的方式来产生的，因为是复制，所以需要和父进程一模一样。比如primer2程序，用ps命令把程序暂停起来，然后观察到：当前的shell终端fork了一个primer2子进程，而primer2子进程中又fork除了201个子进程，所以产生了201个primer2进程。后者比较好理解，由primer2执行了201次fork语句产生了201个子进程，这201个进程是和primer2一模一样的，代码以及执行的位置都一样，只不过再往下由于父子进程就会根据自己的身份来选择预先设定好的所要执行的代码
+
+但是比如说用ps命令查看进程树的话，比如说像之前的程序就会看到如下的进程关系树：当前的shell把它当做bash，在终端上就会出现类似的级联关系，由我们写的primer2进程创建出了201个子进程，这201个进程就是和primer2一模一样的，可是在它之前还有一层关系，当前的父进程primer2之前还有一个shell进程。1. 但是如果按照之前的说法，一个父进程创建子进程是通过复制自己的方式来进行创建的，为什么这个primer2跟bash不一样呢，为什么当前的shell进行创建出来的不是一个shell进程而是一个primer2进程，这是一个问题；2. 还有一个问题：假设说当前算上父进程一共202个进程，在代码中就已经约定了如果是子进程就执行XX，如果是父进程就执行XX，那父子进程要执行的工作全在一个位置声明，换句话说各个子进程每个子进程执行的内容是一样的，父子进程的任务全在代码中体现出来了，那这样的话就不能让子进程去执行一段别的可执行进程它只能执行事先给规定好的代码，这样子放大点来想的话难不成要把所有要用的功能全部在一段程序当中声明吗？这就有点像html代码中的frame标签，frame标签里装的是外部任意一个可被展示的内容，但是并没有在html代码中规定这个frame需要被展示一些什么东西，所以这里就需要用到exec函数族
+
+```shell
+bash
+	./primer2
+		./primer2
+		./primer2
+		./primer2
+		...201
+```
+
+>NAME
+>
+>> execl, execlp, execle, execv, execvp, execvpe - execute a file
+>
+>SYNOPSIS
+>
+>> #include <unistd.h>
+>>
+>> extern char **environ;
+>>
+>> int execl(const char \*pathname, const char \*arg, ...);
+>> int execlp(const char \*file, const char \*arg, ...);
+>> int execle(const char \*pathname, const char \*arg, ..., char *const envp[]);
+>>
+>> int execv(const char \*pathname, char \*const argv[]);
+>> int execvp(const char \*file, char \*const argv[]);
+>
+>1. execute a file：这些函数族的功能都是统一的，即执行一个文件，有一句话非常重要：exec函数族的功能是`replaces the current process image with a new process image`，用一个新的进程映像去替换当前进程映像
+>2. int execl(const char \*pathname, const char \*arg, ...)：把要运行的二进制可执行文件的路径地址作为参数pathname，char \*arg和...代表着执行pathname对应的文件时应该传递的参数，当然可以传多个参数，但是要在最后补一个NULL作为当前传递参数的结束
+>3. execlp：不必给出可执行程序的路径，只需要给出文件名即可以及各种参数，参数形式如execl。为什么可以直接传递一个文件名而不用传递一个文件路径，是因为有个环境变量environ，这个环境变量可以理解为在配置java或者各种程序时进行各种路径配置时已经配置好的值
+>4. execle：envp[]就代表着可以把自定义的存放环境变量的文件导入进来
+>5. 前面三个函数看起来用...来表示变参形式，但其实是固定参数，因为一旦要传参数，就必须要在函数传参末尾添加一个NULL，那就表示当前的参数个数是固定了的；其实后两个函数才是真正的变参函数
+>
+>RETURN VALUE
+>
+>> The  exec() functions return only if an error has occurred.  The return value is -1, and errno is set to indicate the error.
+>
+>6. exec函数如果有返回值的话，那么就意味着replace失败。如果replace成功的话，那么进程映像就会被一个新的进程映像所替换
+
+1. 为什么在shell下面执行`./primer2`能够产生一个子进程，并且子进程还是primer2，而不是shell或者父进程，原因就在于exec函数族的功能，通过一个打印时间戳的小例子来看下一个进程是如何摇身一变成为另一个进程的，也即"你还是你，你已经不是你了"
+
+```c
+// exec.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main()
+{
+    puts("Begin...");
+
+    execl("/bin/date", "date", "+%s", NULL);
+    perror("execl()");
+    exit(1);
+
+    puts("End...");
+
+    exit(0);
+}
+
+```
+
+* 10：`date +%s`命令意味打印当前时间的时间戳， date命令的可执行文件在/bin/date，并且需要注意的是函数参数里的argv都是从argv[0]开始的，argv[0]就意味着命令，比如`ls -la`中ls就是argv[0]；最后以NULL作为结束，即argv[0]=date，argv[1]=+%s，argv[2]=NULL
+
+因为execl的功能是用一个新的进程映像来替换目前的进程，也就是说当前的进程映像已经替换为了/bin/date，所以End语句打印不出来
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./exec 
+Begin...
+1647949601
+```
+
+其实这段程序是有一点问题的，如果执行`./exec > /tmp/out`命令输出重定向到文件中去就会发现连Begin都打印不出来，即在终端能够输出Begin，但是重定向到文件当中去的时候就会出现问题，所以在exec函数族的使用过程中也一定要注意fflush的使用，即在exec之前一定要需要刷新该刷新的所有流，因为还是那句话puts是基于行缓冲机制实现的，换行符代表刷新缓冲区，如果往文件里输入的话换行符就只代表一个换行的作用，结果这个Begin语句被放到缓冲区还没来得及输出就执行execl命令导致一个新的进程映像date替代了旧的进程映像，但是在新的进程印象里没有刷新缓冲区的操作，所以就会出现下面的问题
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ cat /tmp/out 
+1647950781
+```
+
+完善程序
+
+```c
+// exec.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main()
+{
+    puts("Begin...");
+    fflush(NULL);  // !!!
+
+    execl("/bin/date", "date", "+%s", NULL);
+    perror("execl()");
+    exit(1);
+
+    puts("End...");
+
+    exit(0);
+}
+
+```
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ gcc exec.c -o exec
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./exec > /tmp/out
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ cat /tmp/out 
+Begin...
+1647951154
+```
+
+"你还是你，但你已经不是你了"的意思是壳子没有变，壳子指的是PID，一旦fork出一个子进程就给子进程分配一个PID，即使当前进程映像被替换成了别的进程映像，但是PID是不会改变的。其实会发现上面的函数其实是没有意义的，因为既然我要使用别的程序代码，为什么不在一开始就用执行别的程序反而是要创建一个进程然后用exec函数族去替换调用呢？
+
+* 把三个函数(fork,exec,wait)串成一块
+
+```c
+// few.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main()
+{
+    pid_t pid;
+    puts("Begin...");
+    fflush(NULL);
+
+    pid = fork();
+    if (pid < 0)
+    {
+        perror("fork()");
+        exit(1);
+    }
+    if (pid == 0)
+    {
+        execl("/bin/date", "date", "+%s", NULL);
+        perror("execl()");
+        exit(1);
+    }
+
+    wait(NULL);
+
+    puts("End...");
+    // getchar();
+
+    exit(0);
+}
+
+```
+
+* 12：fork之前一定要记得刷新所有流
+* 20-25：如果是子进程就去执行别的程序
+* 29：如果是父进程就等待子进程的返回
+
+在本节最开始的时候讲到了一个问题就是在一个程序里代码中把父子进程所有的执行逻辑都写进去，这就显得很臃肿和冗余，通过few代码我们才知道exec就是有种类似模块化开发的意思在，即子进程要执行的程序在别的可执行文件中定义
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ gcc few.c -o few
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./few 
+Begin...
+1647951993
+End...
+```
+
+# 进程-命令实现
+
+来看下ls这个命令在shell环境下执行的时候所进行的工作一次来串联fork、exec和wait函数
+
+shell环境下执行一个命令的时候其实就是fork产生了一个子进程，产生的这个子进程本质来说就是shell本身，然后再去执行exec函数让子进程变成所要执行的命令。在子进程运行的时候，父进程在执行wait函数等待子进程的所有结果都输出完之后，给子进程收尸，然后再去执行别的任务，所以可以看到一旦执行ls命令都是先把结果显示出来，然后再弹出命令行。由于当前shell程序写的是一个死循环，所以当前shell继续打印命令行等待终端的输入情况
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ls
+exec  exec.c  few  few.c  fork1  fork1.c  primer  primer2  primer2.c  primer.c  primerN  primerN.c
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ 
+```
+
+<img src="index2.assets/image-20220322214726389.png" alt="image-20220322214726389" style="zoom:67%;" />
+
+包括之前实现的没有添加wait操作的primer2代码，这份代码是实现结果是命令行先输出然后输出程序结果，因为shell创建了一个子进程，子进程primer2再运行，因为在primer2代码中没有加wait操作，所以primer2在fork完之后立马执行exec操作，然后当前的shell作为primer2的父进程正在wait，所以等待primer2一退出，收尸完了之后打印出命令行就结束了，但是primer2进程的子进程就变成了孤儿进程，此时该输出就输出
+
+```
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./primer2 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ 30000023 is a primer
+30000037 is a primer
+30000049 is a primer
+30000079 is a primer
+30000001 is a primer
+30000083 is a primer
+...
+```
+
+此时有个问题：为什么子进程的信息也显示在当前终端上而不是另外开一个终端显示？为什么父子进程能够打印到同一个终端上
+
+有很多人认为不就应该显示打印在终端上吗，因为当前用的就是这个terminal。其实很多在我们眼里稀松平常，理所应当的现象都是蕴含着各种基本知识
+
+父进程当中有一个文件描述符表，文件描述符表内存放着各种文件打开时的fd，包括默认的3个标准的设备stdin、stdout、stderr分别关联着0、1、2号文件描述符。一旦父进程执行了fork操作，那么产生的子进程是通过复制自身的方式所产生的，那么子进程里也会有一个一模一样的文件描述符表，所以子进程文件描述符是从父进程中继承过来的，包括0、1、2这三个描述符，而子进程中的这三个描述符也指向与父进程中指向的相同硬件设备，这就是为什么父子进程会共用同一个terminal的信息
+
+其实父子进程间通信也是通过这种方式，比如父进程打开了一个文件，并且给这个文件分配3号描述符，此时一旦fork子进程，则子进程的3号描述符也指向相同的文件，那么现在父子进程间就可以实现通信了，比如父进程写文件->子进程读文件->子进程写文件->父进程读文件，这就是通信最基础的原型，但是要在这种通信中更多地考虑竞争和冲突：如何保证父进程写文件的时候子进程没有在读文件？反之亦然，这就是之后进程间通信要解决的问题
+
+* 使用few实现sleep(100)的功能
+
+```c
+// sleep.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main()
+{
+    pid_t pid;
+    puts("Begin...");
+    fflush(NULL);
+
+    pid = fork();
+    if (pid < 0)
+    {
+        perror("fork()");
+        exit(1);
+    }
+    if (pid == 0)
+    {
+        execl("/bin/sleep", "sleep", "100", NULL);
+        perror("execl()");
+        exit(1);
+    }
+
+    wait(NULL);
+
+    puts("End...");
+    // getchar();
+
+    exit(0);
+}
+
+```
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./sleep 
+Begin...
 
 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc$ ps axf
+39242 pts/4    Ss     0:00  |   |   |   |   \_ /usr/bin/bash
+104122 pts/4    S+     0:00  |   |   |   |   |   \_ ./sleep
+104123 pts/4    S+     0:00  |   |   |   |   |       \_ sleep 100
+```
+
+sleep是bash的子进程，sleep 100是sleep的子进程
+
+这里要提一句argv[1]，我们通常对argv[1]没有那么关心，而且我们一般都把可执行文件的名字声明为源文件除去.c之后的名字
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ls
+exec  exec.c  few  few.c  fork1  fork1.c  primer  primer2  primer2.c  primer.c  primerN  primerN.c  sleep  sleep.c
+```
+
+但其实如果我们直接执行gcc [文件名]的话，其实就是生成了一个可执行的二进制文件名为a.out，其实我们并没有那么关心可执行文件的名字，也就是说我们并没有那么关心argv[0]
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ls
+a.out  exec  exec.c  few  few.c  fork1  fork1.c  primer  primer2  primer2.c  primer.c  primerN  primerN.c  sleep  sleep.c
+```
+
+但是在sleep程序中有这样一个问题：用exec调用某一个进程的时候，给该进程传参是从argv[0]开始的，又因为我们不关心argv[0]，所以这就可能导致我们能随意取名，这里的httpd是随意取名的
+
+```c
+execl("/bin/sleep", "httpd", "100", NULL);
+```
+
+改完代码之后再来执行一遍源程序，sleep进程的子进程已经变成了httpd，但是当前运行的是sleep这个二进制文件，我们让其实现的功能也是sleep(100)，假设说创建的子进程被别人利用了，所以它可以被伪造成类似这样的名字，这个就是木马程序的低级藏身办法，当我们感觉操作系统或者数据文件不太安全想查询进程关系的时候就只会发现一个httpd服务器在运行，但其实是一个不相关甚至是病毒文件在运行
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./sleep 
+Begin...
 
 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc$ ps axf
+39242 pts/4    Ss     0:00  |   |   |   |   \_ /usr/bin/bash
+104122 pts/4    S+     0:00  |   |   |   |   |   \_ ./sleep
+104123 pts/4    S+     0:00  |   |   |   |   |       \_ httpd 100
+```
 
+* 实现一个简易版的shell
 
+1. 首先确定shell是一个死循环
+2. 打印命令行
+3. 习惯性输出$符号，$后面输命令，当前shell接收输入命令之后应该是先fork出来一个子进程，随后让子进程摇身一变，也就是调用exec函数族当中的某一个去执行某个命令，而shell本身作为父进程去wait，等子进程获得结果之后然后给子进程收尸进行资源释放
+4. 调用exec这一族的任意一个函数，就要想到一个问题：不管是哪个函数，定参还是变参的形式都要把当前参数一个一个拆分出来，因为在传参的时候不是要一个大串，而要的是argv[0]，argv[1]....，比如`ls -l /etc -a /tmp /home -i ......`
+5. 当前在shell环境下进行的命令实现有两种命令：1. 外部命令；2. 内部命令
+    * 外部命令：一个命令的二进制可执行文件是存放在磁盘上的，那么这个命令就被称为外部命令
+    * 内部命令：除了外部命令以外的命令，比如目录的管理、当前进程消亡之后子进程如何处理、调度命令（目前而言暂时不去考虑，因为涉及的知识点太多）
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
+int main()
+{
+    while (1)
+    {
+        prompt();
 
+        getline();
 
+        parse();
 
+        if (是内部命令)
+        {
+        }
+        else if (是外部命令)
+        {
+            fork();
+            if (< 0)
+            {
+            }
+            if (== 0) // child
+            {
+                execXX();
+                perror();
+                exit(1);
+            }
+            else // parent
+            {
+                wait();
+            }
+        }
+    }
 
+    exit(0);
+}
+```
 
-
-
-
-
+* 7：shell终端是一个死循环
+* 9：打印提示符prompt
+* 11：从终端获取输入内容，不要用gets，因为可能产生内存溢出，所以使用getline，不管一行字符多大都能全部拿到直到遇到\n为止
+* 13：解析刚才拿到的输入内容，区分是内部命令还是外部命令
+* 18-34：立刻使用fork创建出子进程，如果出错就....，如果成功则区分父子进程；如果是子进程则通过exec函数调用argv[0]、argv[1]等参数去replace想要变成的进程，如果变错则报错结束；如果师父进程就等着给子进程收尸，回收完子进程资源后就回到了while循环一开始再继续执行下一步的命令执行
 
 
 
