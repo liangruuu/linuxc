@@ -332,7 +332,11 @@ PID TTY      STAT   TIME COMMAND
 >
 > > These functions are always successful.
 >
-> 
+> RETURN VALUE
+>
+> > On success, the PID of the child process is returned in the parent, and 0 is returned in the child.  On  failure,  -1  is returned in the parent, no child process is created, and errno is set appropriately.
+>
+> 3. 如果创建成功则返回进程的pid给父进程，如果失败则返回-1，这个pid就是用做分支语句的判断。并且返回给子进程0值
 
 进程的产生fork
 
@@ -365,17 +369,340 @@ PID TTY      STAT   TIME COMMAND
 
 执行fork函数之后父子进程的区别：fork的返回值不同，pid不同，ppid也不同(因为父进程也是由父进程的父进程fork出来的，所以也是有ppid的)，未决信号和文件锁不继承，资源利用量清零
 
+init进程：实际上当前的启动过程从init进程产生，它起了一个分水岭似的地位，在init进程产生之前内核是相当于一个程序在执行，产生之后就想到与一个库守在后台，即每次出现异常的时候出来解决这个异常；init进程是所有进程的祖先进程，并且进程标识符为1号
+
+# 进程-fork实例
+
+* 实现fork
+
+```c
+// fork1.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main()
+{
+    pid_t pid;
+
+    printf("[%d]:Begin...\n", getpid());
+
+    pid = fork();
+    if (pid < 0)
+    {
+        perror("fork()");
+        exit(1);
+    }
+
+    if (pid == 0)		// child
+    {
+        printf("[%d]:Child is working...\n", getpid());
+    }
+    else				// parent
+    {
+        // sleep(1);
+        printf("[%d]:Father is working...\n", getpid());
+    }
+
+    printf("[%d]:End...\n", getpid());
+    
+    getchar();
+
+    exit(0);
+}
+
+```
+
+* 14-18：在创建子进程之后做的第一个工作就是进行条件判断，如果出错当前进程就没有继续的必要
+* 13：一旦执行fork语句产生父子进程关系，就相当于代码一式两份了，连执行到的位置都一样，父子进程从fork语句开始分裂，因此子进程不会执行15行之前的代码，父子进程开始分别对16行以后的代码进行判断执行
+* 32：让程序等待字符输入，不要让程序结束，以此来观察父子进程的关系
+
+<img src="index2.assets/image-20220322090425818.png" alt="image-20220322090425818" style="zoom:80%;" />
+
+出现倒数二行结果的原因是因为当前所写函数并不完善，终端命令行相较于子进程结果先打印出来了；父进程的进程号为1508，子进程的进程号为1509，在打印出Begin之后有可能看到父进程先打印也有可能看到子进程先打印。永远不要凭空猜测父子进程谁先被调度，因为调度情况是由调度器的调度策略来决定哪个进程先运行
+
+假设一定要让子进程先运行，因为现在调度器决定的是父进程先运行，那就让父进程待一会，最简单的方式就是让父进程执行sleep函数
+
+<img src="index2.assets/image-20220322091027321.png" alt="image-20220322091027321" style="zoom:80%;" />
+
+* 观察父子进程的关系
+
+```c
+...
+printf("[%d]:End...\n", getpid());
+
+// 让程序等待字符输入，不要让父子程序结束，以此来观察父子进程的关系
+getchar();
+
+exit(0);
+...
+```
+
+<img src="index2.assets/image-20220322091544792.png" alt="image-20220322091544792" style="zoom:80%;" />
+
+调用`ps axf`命令观察进程关系，这个关系是呈现一种阶梯状关系的，当前shell创建fork1进程，在fork1执行过程中又创建一个子进程，这个子进程连名字都是一样的，因为正如之前说的子进程是父进程的一模一样的拷贝。这种阶梯状关系的源头就是init进程，所以并不是init进程直接fork出来所有进程，而是呈一种阶梯状关系不断地fork下去
+
+<img src="index2.assets/image-20220322091834618.png" alt="image-20220322091834618" style="zoom:80%;" />
+
+大家会发现这样的现象，之前代码的结果在终端上只会输出一个begin语句和两个end语句，这是理所应当的，但是当把输出换做是文件而不是终端的话就会出错
+
+```shell
+> ./fork1 > /tmp/out
+> vim /tmp/out 
+
+# result
+[12395]:Begin...
+[12395]:Father is working...
+[12395]:End...
+[12395]:Begin...
+[12396]:Child is working...
+[12396]:End...
+```
+
+而且如果把第11行的换行符删掉的话在终端也会出现输出两个begin语句的现象，对于这个现象的解释是因为没有换行符，所以导致文本就被放到了输入缓冲区中，实际上也不完全是这样，因为即使begin语句后面跟着换行符，在输出到文件去的时候也会导致输出两个begin语句，所以加上换行符并没有解决这个问题
+
+<img src="index2.assets/image-20220322093639364.png" alt="image-20220322093639364" style="zoom:80%;" />
+
+所以解决这类问题的方法就是在fork之前加一句fflush函数来刷新所有成功打开的流，所以这行非常重要。因为加一个换行符只不过是往终端输出，终端是一个标准的输出设备，而标准的输出设备是行缓冲模式，所以换行符会刷新缓冲区，而文件默认是全缓冲模式，在全缓冲模式下换行符已经不代表刷新缓冲区了，只是一个换行的作用。也就是说在begin放入了缓冲区中，还没来得及写入文件的时候就执行fork语句，那么父子进程的缓冲区里就各自有一个begin语句，所以才会输出两次。因为这个begin语句是由父进程创建的，所以即使是在子进程输出的语句，最前面的进程号也显示的是父进程的进程号
+
+```markdown
+...
+printf("[%d]:Begin...\n", getpid());
+
+fflush(NULL);
+
+pid = fork();
+...
+```
+
+fork案例的完整代码如下
+
+```c
+// fork1.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main()
+{
+    pid_t pid;
+
+    printf("[%d]:Begin...\n", getpid());
+
+    fflush(NULL);
+
+    pid = fork();
+    if (pid < 0)
+    {
+        perror("fork()");
+        exit(1);
+    }
+
+    if (pid == 0)
+    {
+        printf("[%d]:Child is working...\n", getpid());
+    }
+    else
+    {
+        printf("[%d]:Father is working...\n", getpid());
+    }
+
+    printf("[%d]:End...\n", getpid());
+
+    // getchar();
+
+    exit(0);
+}
+
+```
+
+加了fflush之后就可以正常只输出一个begin语句了
+
+```shell
+# result
+
+[13761]:Begin...
+[13761]:Father is working...
+[13761]:End...
+[13762]:Child is working...
+[13762]:End...
+```
+
+* 一个进程实现筛选质数的功能
+
+```c
+// primer.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#define LEFT 30000000
+#define RIGHT 30000200
+
+int main()
+{
+    int i, j, mark;
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        mark = 1;
+        for (j = 2; j < i / 2; j++)
+        {
+            if (i % j == 0)
+            {
+                mark = 0;
+                break;
+            }
+        }
+        if (mark)
+            printf("%d is a primer\n", i);
+    }
+
+    exit(0);
+}
+
+```
+
+```shell
+# result
+
+30000001 is a primer
+30000023 is a primer
+30000037 is a primer
+30000041 is a primer
+30000049 is a primer
+30000059 is a primer
+30000071 is a primer
+30000079 is a primer
+30000083 is a primer
+30000109 is a primer
+30000133 is a primer
+30000137 is a primer
+30000149 is a primer
+30000163 is a primer
+30000167 is a primer
+30000169 is a primer
+30000193 is a primer
+30000199 is a primer
+
+> ./primer | wc -l		# 查看输出结果有多少行
+# result
+18
+
+> time ./primer			# 查看进程执行时间
+# result
+real    0m0.534s
+user    0m0.525s
+sys     0m0.009s
+
+```
+
+* 多个进程处理筛选质数功能
+
+```c
+// primer2.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#define LEFT 30000000
+#define RIGHT 30000200
+
+int main()
+{
+    int i, j, mark;
+    pid_t pid;
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+
+        pid = fork();
+        if(pid < 0)
+        {
+            perror("fork()");
+            exit(1);
+        }
+        if(pid == 0)
+        {
+            mark = 1;
+            for (j = 2; j < i / 2; j++)
+            {
+                if(i%j == 0)
+                {
+                    mark = 0;
+                    break;
+                }
+            }
+            if(mark)
+                printf("%d is a primer\n",i);
+
+        }
+    }
 
 
+    exit(0);
+}
 
+```
 
+20：父进程执行i++，并且只管fork出子进程，而子进程执行具体的筛选操作
 
+以上程序在一般的计算机上一定会造成资源报警，因为这段代码其实不是fork了201个子进程，而是当父进程fork出子进程之后，因为子进程的代码和父进程代码是一模一样的，所以也要执行循环语句，因此子进程也会fork出子进程的子进程，这个操作同样要执行200次，以此类推......
 
+```markdown
+1 -> 200
+	1 -> 199
+2 -> 199
+	1 -> 198
+......
+```
 
+所以需要给子进程一个退出的标记，也即调用exit函数
 
+```c
+// ...
+if(mark)
+    printf("%d is a primer\n",i);
 
+exit(0);
+// ...
+```
 
+添加exit函数之后执行一遍程序，可以观察到显示结果变得无序；执行time命令观察执行时间
 
+```shell
+# result
+...
+30000199 is a primer
+30000109 is a primer
+30000133 is a primer
+30000137 is a primer
+30000049 is a primer
+30000149 is a primer
+...
+
+> time ./primer2	# 多进程执行
+
+# result
+real    0m0.063s
+user    0m0.000s
+sys     0m0.048s
+
+> time ./primer		# 单进程执行
+
+# reuslt
+real    0m0.534s
+user    0m0.521s
+sys     0m0.012s
+```
+
+因为涉及到创建、切换进程导致程序执行时间变慢，又因为由于是多进程在处理这段程序所以导致程序执行时间加快，总的来说执行效率是变快的
 
 
 

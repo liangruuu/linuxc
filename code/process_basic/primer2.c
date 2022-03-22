@@ -39,8 +39,8 @@ int main()
         }
     }
 
-    for (i = LEFT; i <= RIGHT; i++)
-        wait(NULL);
+    // for (i =LEFT; i <= RIGHT; i++)
+    //     wait(NULL);
 
     exit(0);
 }
