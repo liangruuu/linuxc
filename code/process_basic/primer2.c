@@ -35,12 +35,13 @@ int main()
             if (mark)
                 printf("%d is a primer\n", i);
 
+            // sleep(1000);
             exit(0);
         }
     }
 
-    // for (i =LEFT; i <= RIGHT; i++)
-    //     wait(NULL);
+    for (i = LEFT; i <= RIGHT; i++)
+        wait(NULL);
     // sleep(1000);
 
     exit(0);

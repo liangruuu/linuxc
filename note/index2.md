@@ -849,27 +849,175 @@ fork是通过复制父进程的方式来产生一个子进程，假设父进程�
 
 <img src="index2.assets/image-20220322132833585.png" alt="image-20220322132833585" style="zoom: 67%;" />
 
+# 进程-wait和waitpid
 
+进程的消亡以资源释放
 
+* wait();
+* waitpid();
 
+>NAME
+>
+>> wait, waitpid, waitid - wait for process to change state
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <sys/wait.h>
+>>
+>> pid_t wait(int *wstatus);
+>>
+>> pid_t waitpid(pid_t pid, int *wstatus, int options);
+>
+>1. wait for process to change state：等待进程状态发生变化
+>2. pid_t wait(int *wstatus)：wstatus表示的是进程状态，要的是一个整型指针类型数据，这个wait操作是把当前进程子进程收尸回来的状态值放到这个wstatus变量当中去，因为是要把值找一个变量存储起来，所以传参是指针类型
+>3. pid_t waitpid(pid_t pid, int *wstatus, int options)：指定一个PID回收，把退出码存放在wstatus指定的存储空间中，在收尸阶段的配置在options字段设置
 
+在之前我们执行primer函数的时候，结果是命令行先显示出来然后才是逐渐打印结果。本来所有的程序理应是先出结果再出命令行，本节讲解的wait操作其实也就是在解释这个现象
 
+<img src="index2.assets/image-20220322142515872.png" alt="image-20220322142515872" style="zoom:67%;" />
 
+2. wait函数如果成功的话返回的是终止的子进程ID，如果失败则返回-1
 
+>RETURN VALUE
+>
+>> wait(): on success, returns the process ID of the terminated child; on error, -1 is returned.
 
+其实可以给status传值NULL，因为可以只收尸不关注返回回来的状态，linux提供了若干宏来检测当前进程的退出状态
 
+>DESCRIPTION
+>
+>> WIFEXITED(wstatus)：子进程是否正常结束，如果正常结束则返回true，否则返回false
+>>
+>> WEXITSTATUS(wstatus)：返回子进程结束时的状态，这个宏值必须要在WIFEXITED()返回值为真的时候才能检测，即首先得保证子进程是正常结束，然后这个宏就能打印子进程的退出码，即return()或者exit()括号里的值，比如常见的return 0; exit(0)，则退出码就是0
+>>
+>> WIFSIGNALED(wstatus)：如果子进程是由一个信号终止的，则返回true，也就是说子进程不是正常结束而是被一个信号叫停
+>>
+>> WTERMSIG(wstatus)：如果WIFSIGNALED为真，则可进一步使用。把导致当前子进程结束的signal number的编号返回
+>>
+>> ......
+>
+>
 
+wait函数是没有指向的，即参数中并没有指定回收哪个子进程，只有等到把子进程回收之后通过返回值才知道其具体的PID，所以waitpid就是来解决这个不足的
 
+3. 因为waitpid函数中有pid，所以就可以指定回收具体的子进程，其实waitpid这个函数好用的地方并不在于PID这个参数，而在于options参数。之前的wait函数是死等，即子进程结束之后，进程状态发生了改变，则会有个状态码status来通知父进程，随后父进程才去收尸，如果子进程状态出了问题永远也通知不了父进程的话，那么父进程就会一直处于等待的状态；但如果是waitpid的话就有着options可以设置某些参数来改变死等的状态
 
+> DESCRIPTION
+>
+> > The value of options is an OR of zero or more of the following constants:
+> >
+> > WNOHANG     return immediately if no child has exited.
+> >
+> > WUNTRACED   also return if a child has stopped (but not traced via ptrace(2)).  Status for  traced  children  which  have stopped is provided even if this option is not specified.
+> >
+> > WCONTINUED (since Linux 2.6.10)
+> > also return if a stopped child has been resumed by delivery of SIGCONT.
+>
+> 
 
+* options是一个位图
 
+* WNOHANG：如果添加了WNOHANG选项的话，即使当前没有子进程结束运行退出，也要立即退出，相当于WNOHANG选项把waitpid这个操作从阻塞变为非阻塞。wait操作死等收一个子进程的尸然后发现返回值，才能直到回收的是哪个子进程；waipid中如果options字段为0就相当于wait操作，如果options字段不为空，比如说是WNOHANG，那么如果指定进程仍在运行也会立刻返回不死等，如果确实已经结束了才会回收子进程。只有在子进程状态发生变化的时候才能执行收尸操作取出退出码然后释放资源，一个进程如果在正常运行是无法收尸的，有了options字段waitpid函数可以是非阻塞的，但是wait函数一定是阻塞的
 
+>DESCRIPTION
+>
+>> The value of pid can be:
+>>
+>> < -1   meaning wait for any child process whose process group ID is equal to the absolute value of pid.
+>>
+>> -1     meaning wait for any child process.
+>>
+>> 0      meaning  wait  for any child process whose process group ID is equal to that of the calling process at the time of the call to waitpid().
+>>
+>> 0    meaning wait for the child whose process ID is equal to the value of pid.
 
+PID的值其实也没有这么简单，PID如果大于0则意味着要回收的进程就是函数参数PID指定的进程；如果为0表示回收同组中的其他任意一个子进程；如果为-1则可以回收任意一个子进程；如果小于-1，则回收PID为对应值绝对值的哪个进程，比如返回值为-5，则回收PID为5的子进程
 
+wait就相当于`waitpid(-1, &wstatus, 0)`的封装，-1表示回收任意一个子进程，状态码放入wstatus地址空间，没有options配置
 
+* 添加收尸手段之后的primer程序
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
+#define LEFT 30000000
+#define RIGHT 30000200
 
+int main()
+{
+    int i, j, mark;
+    pid_t pid;
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+
+        pid = fork();
+        if (pid < 0)
+        {
+            perror("fork()");
+            exit(1);
+        }
+        if (pid == 0)
+        {
+            mark = 1;
+            for (j = 2; j < i / 2; j++)
+            {
+                if (i % j == 0)
+                {
+                    mark = 0;
+                    break;
+                }
+            }
+            if (mark)
+                printf("%d is a primer\n", i);
+
+            // sleep(1000);
+            exit(0);
+        }
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+        // wait(&st);
+        wait(NULL);
+    
+    // sleep(1000);
+
+    exit(0);
+}
+
+```
+
+* 43-45：如果想要获取状态码则把状态写入st地址，如果不关心状态，则可以传入NULL
+
+添加了收尸手段之后程序的结构就发生变化了，父进程fork了201个子进程，则等待子进程执行完毕，并且等待201次。当201个子进程陆续的exit回来，父进程就等在那边一个个回收
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./primer2
+# result
+30000001 is a primer
+30000023 is a primer
+30000041 is a primer
+30000037 is a primer
+30000049 is a primer
+30000071 is a primer
+30000079 is a primer
+30000109 is a primer
+30000059 is a primer
+30000163 is a primer
+30000137 is a primer
+30000133 is a primer
+30000167 is a primer
+30000083 is a primer
+30000193 is a primer
+30000149 is a primer
+30000199 is a primer
+30000169 is a primer
+```
 
 
 
