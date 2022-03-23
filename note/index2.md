@@ -1781,3 +1781,112 @@ liangruuu@liangruuu-virtual-machine:~$ ls -l /usr/bin/passwd
 * seteuid()：设置当前进程的real user id
 * setegid()：设置当前进程的real group id
 
+# 进程-用户权限和组权限实例
+
+setuid函数的作用是设置effective userid，如果想实现ubuntu系统下的sudo命令的话，就需要set当前用户的effective userid设置成root用户
+
+* 实现切换成其他用户执行命令的程序，执行效果类似于`./mysu username cd /home/username`，即切换到username用户执行cd命令
+
+```c
+// mysu.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+int main(int argc, char **argv)
+{
+    pid_t pid;
+
+    if (argc < 3)
+    {
+        fprintf(stderr, "Usage: %s <command> <file>\n", argv[0]);
+        exit(1);
+    }
+
+    pid = fork();
+    if (pid < 0)
+    {
+        perror("fork()");
+        exit(1);
+    }
+    if (pid == 0)
+    {
+        setuid(atoi(argv[1]));
+        execvp(argv[2], argv + 2);
+        perror("execvp()");
+        exit(1);
+    }
+
+    wait(NULL);
+
+    exit(0);
+}
+```
+
+* 24-30：如果是子进程就执行exec族函数，因为执行的是变参形式的命令，所以采用execvp函数，并且执行的命令是从argv[2]开始；第二个函数参数是一个地址，所以传入参数地址
+* 26：设置子进程的effective userid，为了简化程序实现，把用户名简化成了id值，这个id是一个整型数值，root用户对应的uid为0
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ cat /etc/shadow
+cat: /etc/shadow: Permission denied
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./mysu 0 /etc/shadow
+
+
+# result 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ cat /etc/shadow
+cat: /etc/shadow: Permission denied
+```
+
+普通用户是无法随便把自己设置成root用户的，所以如果要把用户身份切换成其他身份的话取决于想要成为的那个用户有没有授予权限给你
+
+在真正能使得非root权限用户查看shadow文件之前需要作如下几个操作，这几步操作的本质就是让root用户授予权限给当前用户以便该用户能使用root的权限
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ su
+Password: 
+root@liangruuu-virtual-machine:/home/liangruuu/study/linuxc/code/process_basic# 
+
+root@liangruuu-virtual-machine:/home/liangruuu/study/linuxc/code/process_basic# chown root mysu
+root@liangruuu-virtual-machine:/home/liangruuu/study/linuxc/code/process_basic# ls -l mysu
+-rwxrwxr-x 1 root liangruuu 17040 3月  23 18:48 mysu
+root@liangruuu-virtual-machine:/home/liangruuu/study/linuxc/code/process_basic# chmod u+s mysu
+root@liangruuu-virtual-machine:/home/liangruuu/study/linuxc/code/process_basic# ls -ls mysu
+20 -rwsrwxr-x 1 root liangruuu 17040 3月  23 18:48 mysu
+
+
+# result
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./mysu 0 cat /etc/shadow
+root:$6$u0yJoZ9MmgAcPzoL$UG/ptDnQNj/BMHY1.i.caB7Z63Khdna7Gj9vFOSEwcbQ3pl8NX2L5.ggtOlVERE4URixSYzROoNLcSg0wqjRq1:19074:0:99999:7:::
+daemon:*:19046:0:99999:7:::
+bin:*:19046:0:99999:7:::
+sys:*:19046:0:99999:7:::
+
+......
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
