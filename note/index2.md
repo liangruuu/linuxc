@@ -1523,13 +1523,203 @@ int main()
 * 13：解析刚才拿到的输入内容，区分是内部命令还是外部命令
 * 18-34：立刻使用fork创建出子进程，如果出错就....，如果成功则区分父子进程；如果是子进程则通过exec函数调用argv[0]、argv[1]等参数去replace想要变成的进程，如果变错则报错结束；如果师父进程就等着给子进程收尸，回收完子进程资源后就回到了while循环一开始再继续执行下一步的命令执行
 
+# 进程-shell内部命令实现
+
+1. 第一步打印提示符prompt函数，没有返回值
+
+```c
+static void prompt(void)
+{
+    printf("mysh-0.1$ ");
+}
+```
+
+2. 第二步：getline函数的第一个参数为一个二级指针，第二个参数为set_t类型变量的地址，为的是描述当前地址空间有多大，第三个参数是一个stream流
+
+```c
+char *linebuf = NULL;
+size_t linebuf_size = 0;
+
+if (getline(&linebuf, &linebuf_size, stdin) < 0)
+    break;
+```
+
+3. 第三步：用parse函数解析输入的命令，即linebuf中的内容，parse函数的作用是分割linebuf中的内容，以区分arg[0]，argv[1]...然后把这些参数给之后exec函数族当中的某一个函数使用
+
+```cc
+#define DELIMS " \t\n"
+
+struct cmd_st
+{
+    glob_t globres;
+};
 
 
+static void parse(char *line, struct cmd_st *res)
+{
+    char *tok;
+    int i = 0;
 
+    while (1)
+    {
+        tok = strsep(&line, DELIMS);
+        if (tok == NULL)
+            break;
 
+        if (tok[0] == '\0')
+            continue;
 
+        glob(tok, GLOB_NOCHECK | GLOB_APPEND * i, NULL, &res->globres);
+        i = 1;
+    }
+}
 
+```
 
+* 8：strsep函数给定分隔符，把一个长串分割为由若干小串，在进行分割小串的时候字符串位置指针每判断一位都会向后移动一位，直到分割出一个小串。也就是说执行一次strsep函数只能分割出一个小串，所以需要使用一个循环来不断产生小串
+* 1：定义分隔符DELIMS为空格、Tab、回车
+* 20：若存在多个分隔符间隔的情况，比如`ls -a -l    /etc   /aaa/bbb/ccc`，则跳过当前分割符的判断，因为这些分隔符通过strsep函数的操作已经变成了数组里的一个空元素，所以用尾0来判断
+* 23：tok作为通配符pattern；第二个参数是GLOB_NOCHECK，因为分割函数strsep的特性是解析一次只能产生一个小串，即针对`ls -l -a /etc`这个命令，解析ls然后放入地址，然后第二次循环再解析-l放入第四个参数所指地址并以此类推，但是这样子的操作是会覆盖掉之前的数据的，所以我们需要GLOB_APPEND属性以追加形式替换覆盖，并且变量i的作用是让第一次glob操作不追加，相当于GLOB_NOCHECK或上一个0值，执行完一次之后的操作才追加；第三个参数是出错路径设置为NULL；第四个参数是存放结果的地址值，我们使用一个结构体里的属性来接收，为什么要构建一个结构体呢？因为可能在执行shell命令的时候我们需要其他一些属性，而我们可以把这些属性全部保存在这个结构体里，就像FILE结构体存放了所有关于文件的信息，这里我们为了程序的拓展性就设置了一个结构体，只不过当前只需要在结构体里面放一个地址属性即可
+
+现在出现了一个问题：通过strsep函数把每一个参数都获取出来了，但是没有地方去保存，那么比较理想的是定义一个数组，数组中的每一个元素内容都是字符指针char\*，但是问题又来了，这个数组大小定义为多大？可以发现无法固定一个数组大小，因为函数参数的不确定的，所以无法用一个固定长度的数组去接收变长度的元素。我们可以类比argv的存储，argv就相当于无论参数有多少都能存，直到最后有一个空指针来表示当前字符串的结束，因为我们本身就是在自定义实现一个shell中argv的功能，所以就无法使用现成的argv
+
+glob函数和argv的存储结构很像
+
+>NAME
+>
+>> glob, globfree - find pathnames matching a pattern, free memory from glob()
+>
+>SYNOPSIS
+>
+>> int glob(const char \*pattern, int flags, int (\*errfunc) (const char \*epath, int eerrno), glob_t \*pglob);
+>
+>1. int glob(const char \*pattern, int flags, int (\*errfunc) (const char \*epath, int eerrno), glob_t \*pglob)
+>    
+
+1. 我们可以使用glob_t结构体中的gl_pathv参数来充当argv使用
+
+```c
+typedef struct {
+    size_t   gl_pathc;    /* Count of paths matched so far  */
+    char   **gl_pathv;    /* List of matched pathnames.  */
+    size_t   gl_offs;     /* Slots to reserve in gl_pathv.  */
+} glob_t;
+
+```
+
+glob函数的第一个参数为pattern，但是在我们的shell功能中并没有涉及到通配符的使用，所以这时我们可以使用第二个flag参数来取消对第一个参数的使用
+
+>DESCRIPTION
+>
+>> The argument flags is made up of the bitwise OR of zero or more the following symbolic constants, which modify the behavior of glob():
+>>
+>> ...
+>>
+>> GLOB_NOCHECK
+>> If  no  pattern  matches,  return  the  original pattern.  By default, glob() returns GLOB_NOMATCH if there are no
+>> matches.
+>>
+>> ...
+
+* GLOB_NOCHECK属性的作用就是当没有内容可以匹配当前pattern的话，那么就把当前这个pattern本身返回，比如在我们的shell程序中给定ls命令，然后就会直接返回这个ls命令
+
+完整代码
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <glob.h>
+#include <sys/wait.h>
+
+#define DELIMS " \t\n"
+
+struct cmd_st
+{
+    glob_t globres;
+};
+
+static void prompt(void)
+{
+    printf("mysh-0.1$ ");
+}
+
+static void parse(char *line, struct cmd_st *res)
+{
+    char *tok;
+    int i = 0;
+
+    while (1)
+    {
+        tok = strsep(&line, DELIMS);
+        if (tok == NULL)
+            break;
+
+        if (tok[0] == '\0')
+            continue;
+
+        glob(tok, GLOB_NOCHECK | GLOB_APPEND * i, NULL, &res->globres);
+        i = 1;
+    }
+}
+
+int main()
+{
+    char *linebuf = NULL;
+    size_t linebuf_size = 0;
+    struct cmd_st cmd;
+
+    while (1)
+    {
+        pid_t pid;
+        prompt();
+
+        if (getline(&linebuf, &linebuf_size, stdin) < 0)
+            break;
+
+        parse(linebuf, &cmd);
+
+        if (0)
+        {
+            // 执行内部命令
+            printf("Internal command is not executed\n");
+        }
+        else
+        {
+            // 执行外部命令
+            pid = fork();
+
+            if (pid < 0)
+            {
+                perror("fork()");
+                exit(1);
+            }
+            if (pid == 0)
+            {
+                execvp(cmd.globres.gl_pathv[0], cmd.globres.gl_pathv);
+                perror("execvp()");
+                exit(1);
+            }
+            else
+            {
+                wait(NULL);
+            }
+        }
+    }
+
+    exit(0);
+}
+
+```
+
+* 72：因为exec函数族的前三个函数都需要手动在函数末尾添加一个NULL参数，不太美观，并且后两个函数是实际上的变参函数，符合我们的shell命令格式；采用execvp是因为其一它是可变参数函数，其二它的第一个参数为文件名而不是文件路径，毕竟我们平常在写`ls`命令的时候也不会写`/bin/ls`；`cmd.globres.gl_pathv[0]`表示ls命令，`cmd.globres.gl_pathv`表示各个argv参数，只不过函数要的是字符数组的首地址
+
+```c
+int execvp(const char *file, char *const argv[]);
+```
+
+* 78：父进程等着收尸回售子进程资源
 
 
 
