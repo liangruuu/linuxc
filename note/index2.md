@@ -1721,9 +1721,63 @@ int execvp(const char *file, char *const argv[]);
 
 * 78：父进程等着收尸回售子进程资源
 
+程序
 
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic$ ./mysh 
+mysh-0.1$ ls
+a.out  exec  exec.c  few  few.c  fork1  fork1.c  mysh  mysh.c  primer  primer2  primer2.c  primer.c  primerN  primerN.c  sleep  sleep.c
+mysh-0.1$ whoami
+liangruuu
+mysh-0.1$ 
+```
 
+# 进程-用户权限和组权限实现原理
 
+首先明确自从文件系统开始的时候就能够观察一个文件的user、group、username......用户权限和组权限其实是分作好几种方式进行存放的
 
+比如执行`cat /etc/shadow`命令，会发现权限不够，因为普通用户是无法读取或者修改shadow文件的
 
+```shell
+liangruuu@liangruuu-virtual-machine:~$ cat /etc/shadow
+cat: /etc/shadow: Permission denied
+```
+
+但是有一个操作叫`passwd`，passwd的作用是更改一个用户的口令，这里就遇到这样的问题：超级用户root肯定是可以更改其他用户的口令的，普通用户能够通过passwd命令更改自己的口令，但是如果用户要更改口令，那就一定要更改shadow文件，但是普通用户是没有权限访问shadow文件的，这就存在一个矛盾
+
+还要理解每个用户在执行一段命令的时候其实是带着自己身份去执行的，在讲述这节内容的时候其实就是在讲u+s和g+s是怎样做到的
+
+我们所认为的uid以至于gid其实存的都不止一份，uid存了三份：real uid、effective uid、save uid(res)，那么gid也同理存了三份值，其中可以没有save uid或者save gid，即很多平台不要求id存一分save id，系统鉴定文件权限的时候根据的是effective id，那么当前passwd的执行流程是：当前在shell环境下是带着自己的身份的，即带着3种id`res`，在命令行模式下其实就是shell复制了一个子进程之后调用了passwd命令，其实也就是执行了fork+exec命令，让fork产生的子进程变为passwd，子进程和父进程的身份其实是一样的，所以passwd进程的身份也是res
+
+然后exec命令鉴定权限时发现了u+s的权限，那么什么是u+s和g+s呢：u+s指的是如果一个可执行的文件有u+s的权限的话那么就意味着当别的用户在调用当前这个可执行文件的时候他的身份会切换成当前可执行文件的user身份，然后以该身份去执行此文件，即套了一层皮。如果文件有g+s权限的话，那么就意味着不管任何用户调用这个二进制可执行文件，当前用户的身份就会切换成二进制文件同组用户的身份。这个u+s和g+s的权限就是由exec函数去鉴定的，在执行exec函数的时候发现当前passwd是u+s的权限，因此此时的passwd的user状态就变为了r00，即effective位变成0，save状态变成0，real状态不变，因为鉴定权限依据的是effective状态，所以当用户在执行passwd程序的时候是在以root用户的身份在执行
+
+```shell
+liangruuu@liangruuu-virtual-machine:~$ which passwd
+/usr/bin/passwd
+liangruuu@liangruuu-virtual-machine:~$ ls -l /usr/bin/passwd 
+-rwsr-xr-x 1 root root 68208 Jul 15  2021 /usr/bin/passwd
+```
+
+把root用户的权限下放，比如原先普通用户无法更改自己的口令，但是做了u+s、g+s的实现，因此能够使得普通用户调用passwd来更改自己的口令了，这相当于普通用户获得了root用户的权限
+
+<img src="index2.assets/image-20220323173835435.png" alt="image-20220323173835435" style="zoom: 67%;" />
+
+那么当前shell的身份是从哪来的呢？当前机器环境下产生出的第一个进程是init进程，当init进程产生的时候用户本身还是root用户的权限，即身份是000，然后这时fork+exec产生了一个getty子进程，这个getty进程的效果是在终端输出一段文字让用户输入login name，用户输入完成后getty进程没有执行fork函数而是只执行了exec，使得自己变成了login进程。到login进程阶段，用户就会看到终端提示输入password
+
+在getty和login进程阶段，进程都是以root用户的身份在执行相应操作的，在login进程阶段验证完用户信息之后就会fork+exec产生一个子进程shell，这个shell进程的身份切换成用户自己的res
+
+<img src="index2.assets/image-20220323174815514.png" alt="image-20220323174815514" style="zoom:67%;" />
+
+可能会遇到的几个函数
+
+* getuid()：返回当前进程的real user id
+* geteuid()：返回当前进程的effective user id
+* getgid()：返回当前进程的real group id
+* getegid()：返回当前进程的effective group id
+* setuid()：设置当前进程的effective user id
+* setgid()：设置当前进程的effective group id
+* setreuid()：交换user的两个real id和effective id，这个交换是原子化的操作
+* setregid()：交换group的两个real id和effective id，这个交换是原子化的操作
+* seteuid()：设置当前进程的real user id
+* setegid()：设置当前进程的real group id
 
