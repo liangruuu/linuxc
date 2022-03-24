@@ -637,9 +637,391 @@ int main()
 
 在之前的章节中说过最好不要使用sleep函数，因为在有的环境下sleep函数是由alarm+pause函数封装而成的，所以如果在这个环境下同时使用sleep+alarm函数的话就相当于在程序中引入了多条alarm语句，正如之前说的那样多个alarm函数可能会造成意想不到的结果，但是在某些环境下sleep是由nanosleep函数封装的，这是没问题的，所以不同平台对sleep函数的封装不一样，因此如果要考虑到代码移植的话，不建议使用sleep，除非能保证目标环境下sleep函数的封装方式
 
+# 信号-alarm实例
+
+* 用alarm函数实现定式循环功能：让一个数在5秒内自累加
+
+版本一：不使用alarm函数 
+
+```c
+// 5Sec.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+
+int main()
+{
+
+    time_t end;
+    int64_t count = 0;
+    end = time(NULL) + 5;
+
+    while (time(NULL) < end)
+        count++;
+
+    printf("%ld\n", count);
+
+    exit(0);
+}
+
+```
+
+* 14，16：定义time_t类型的时间值，end为从现在开始5秒后的时间
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./5sec 
+
+# result
+1399835517
+
+
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ time ./5sec > /tmp/out
+
+# result
+real    0m4.362s
+user    0m4.357s
+sys     0m0.004s
+```
+
+版本二：使用alarm函数实现
+
+```c
+// 5Sec.c
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main()
+{
+
+    int64_t count = 0;
+
+    alarm(5);
+
+    while (loop)
+        count++;
+
+    printf("%ld\n", count);
+
+    exit(0);
+}
+
+```
+
+* 11：5秒之后时钟信号到来，则会杀死当前进程，但是当前也没有机会做printf打印。所以说用alarm的默认功能，这个程序是绝对实现不了的，因为程序将会异常终止
+
+我们让时钟信号被终止之后不杀死当前进程，相反去让这个进程去执行一个任务
+
+```c
+// 5Sec.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+#include <signal.h>
+
+static int loop = 1;
+
+static void alarm_handler(int s)
+{
+    loop = 0;
+}
+
+int main()
+{
+
+    int64_t count = 0;
+
+    alarm(5);
+    signal(SIGALRM, alarm_handler);
+
+    while (loop)
+        count++;
+
+    printf("%ld\n", count);
+
+    exit(0);
+}
+
+```
+
+* 18-19：5秒后始终信号到来则把loop的值变为假
+
+这段程序显然是一个异步事件，时钟信号什么时候会到来，来的时候会发生什么事情显然在循环体内是不知道的
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./5sec 
+
+# result
+15130022002
+
+
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ time ./5sec > /tmp/out1
+
+# result
+real    0m5.002s
+user    0m4.998s
+sys     0m0.004s
+```
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./5sec 
+
+# result
+1399835517
+
+
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ time ./5sec > /tmp/out
+
+# result
+real    0m4.362s
+user    0m4.357s
+sys     0m0.004s
 
 
 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./5sec 
+
+# result
+15130022002
 
 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ time ./5sec > /tmp/out1
+
+# result
+real    0m5.002s
+user    0m4.998s
+sys     0m0.004s
+```
+
+从结果可以看出用signal和alarm函数实现的程序要比使用time函数的程序在时间上更加精确，并且执行的次数是版本一的数十倍
+
+使用了alarm函数之后，程序就相当于有了时间观念，那么有了时间观念就意味着什么呢？比如说以之前的mycat代码为例，mycat代码就相当于mycpy代码把目标文件换成了标准输出stdout
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+
+
+#define BUFSIZE 1024
+
+int main(int argc, char **argv)
+{
+    int sfd, dfd = 1;
+    int len = 0;
+    int ret = 0;
+    int pos = 0;
+    char buf[BUFSIZE];
+
+    if(argc < 2)
+    {   
+        fprintf(stderr, "Usage:%s <src_file>\n",argv[0]);
+        exit(1);
+    }
+
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if(sfd < 0)
+        {
+            if(errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    }while (sfd < 0);
+
+
+    while(1)
+    {
+        len = read(sfd, buf, BUFSIZE);
+        if(len < 0)
+        {
+
+            if(errno == EINTR)
+                continue; 
+            perror("read()");
+            break;
+        }
+        if(len == 0)
+            break;
+
+        pos = 0;
+        while(len > 0)
+        {
+            ret = write(dfd, buf + pos, len);
+            if(ret < 0)
+            {
+                if(errno == EINTR)
+                    continue; 
+                perror("write()");
+                exit(1);
+            }
+            pos += ret;
+            len -= ret;
+        }
+    }
+
+    close(sfd);
+
+    exit(0);
+}
+
+```
+
+* 14：因为mycat的功能是把内容输出到终端，所以目标文件就变成了标准输出对应的文件描述符1，并且所有关于dfd的代码就可以删除了
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./mycat alarm.c 
+
+# result
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main()
+{
+
+    alarm(10);
+    alarm(1);
+    alarm(5);
+
+    while (1)
+    {
+        pause();
+    };
+
+    exit(0);
+}
+```
+
+把mycat加上时间观念之后，程序其实可以做很多事情，比如可以使程序结果慢慢地输出到终端上，命令类似于`./slowcat filename`，比如说每秒10个字符地输出，这其实就是一个流量控制算法
+
+任何形式的音影播放器一定会作流量控制，比如说把slowcat命令看做播放器，要把源文件一股脑地读入就会出现比如音乐几秒钟就播放完了，一个几小时的电影几分钟也播放完了，在这种情况下都要用到流量控制。原来的程序是没有流量控制的，我们让程序每秒输出固定大小的字符显然是不能实现的，但是加上刚才说了alarm函数之后，程序就有了时间观念，就能控制每秒播放多少个字符；再比如说通过网络传输数据，比如说有10GB数据，肯定不能一股脑全部把数据塞入网络中，所以可以根据当前使用情况选择每秒钟产生一个或多个固定大小的数据包，这也是流量控制算法的一种表现形式
+
+```c
+// slowcat.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+
+#define CPS 10
+#define BUFSIZE CPS
+
+static volatile int loop = 0;
+
+static void alarm_handler(int s)
+{
+    alarm(1);
+    loop = 1;
+}
+
+int main(int argc, char **argv)
+{
+    int sfd, dfd = 1;
+    int len = 0;
+    int ret = 0;
+    int pos = 0;
+    char buf[BUFSIZE];
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <src_file>\n", argv[0]);
+        exit(1);
+    }
+
+    signal(SIGALRM, alarm_handler);
+    alarm(1);
+
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if (sfd < 0)
+        {
+            if (errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    } while (sfd < 0);
+
+    while (1)
+    {
+        while (!loop)
+            pause();
+        loop = 0;
+
+        while ((len = read(sfd, buf, BUFSIZE)) < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            perror("read()");
+            break;
+        }
+
+        if (len == 0)
+            break;
+
+        pos = 0;
+        while (len > 0)
+        {
+            ret = write(dfd, buf + pos, len);
+            if (ret < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                perror("write()");
+                exit(1);
+            }
+            pos += ret;
+            len -= ret;
+        }
+    }
+
+    close(sfd);
+
+    exit(0);
+}
+
+```
+
+* 12-13：CPS->character per second，每秒钟一次读写数据大小控制在10个字符
+* 37-38：这两行代码的顺序不能够改变，因为如果alarm函数写在前面了，也就意味着可以在alarm和signal中间插入若干代码，而这些代码的执行时间不确定，如果执行时间超过alarm设置的时间，alarm发送SIGALRM信号，但是因为signal函数没有被执行，也就没有定义给信号注册的行为函数，那么就会沿用SIGALRM信号默认的行为，即杀死当前进程。所以只要是设置时钟信号的行为一定要在alarm函数之前定义
+* 55：loop的初始值设置为0，则循环判断为真，则一直进行循环，直到loop值变为1之后才能进行下面的读操作，1秒之后执行行为函数后，loop的值才变成1；为了能继续这个执行逻辑，需要把loop值重新设置为0
+* 19：当第一次执行信号处理函数的时候，就会为自己发出下一秒的时钟信号，即本次执行alarm会触发下一秒的alarm
+* 56：如果没有加上这一行的pause函数其实程序也能正常运行，但是会使得CPU占用率瞬间飙升，也就是说程序处于盲等的状态。因为这在这个循环里loop为假在一秒内已经被判断了无数次，pause函数就是专门用来被信号打断的函数，它信号来之前会让进程一直处于阻塞状态，因为在循环体里定义的pause函数，所以当没有收到信号时循环就不会一直执行下去。直到执行信号处理函数，pause接收到信号退出执行，随后loop值改变，导致跳出循环体
+
+<img src="index3.assets/image-20220324215455637.png" alt="image-20220324215455637" style="zoom:80%;" />
+
+加上pause函数之后的执行结果
+
+<img src="index3.assets/image-20220324220236453.png" alt="image-20220324220236453" style="zoom:80%;" />
+
+其实上面的流量控制算法还有一个别称：漏桶算法，即收到海量的数据也不紧不慢，采取1秒读10个字符的速度缓慢推进，如果没有数据来的话就读不到东西，就会执行假错的逻辑，导致一直在原地打转
+
+```c
+while ((len = read(sfd, buf, BUFSIZE)) < 0)
+{
+    if (errno == EINTR)
+        continue;
+    perror("read()");
+    break;
+}
+```
 
