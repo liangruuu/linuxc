@@ -2028,21 +2028,190 @@ liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic/daemon$
 ...
 ```
 
+这个守护进程代码还有一个缺陷就是标准的报错都是输出到标准输出上去的，但是因为守护进程脱离了控制终端，所
+
+# 进程-系统日志
+
+每一个应用程序都有必要去写系统日志，但是又不能把写系统日志的权限下放给所有的用户，所以就实现一个权限分隔层
+
+```shell
+liangruuu@liangruuu-virtual-machine:/var/log$ cd /var/log/
+liangruuu@liangruuu-virtual-machine:/var/log$ ls
+
+# result
+
+apt               btmp           gdm3             syslog.1           vmware-network.1.log        wtmp
+auth.log          cups           gpu-manager.log  syslog.2.gz        vmware-network.2.log
+auth.log.1        dist-upgrade   hp               syslog.3.gz        vmware-network.3.log
+boot.log          dmesg          installer        syslog.4.gz        vmware-network.4.log
+boot.log.1        dmesg.0        journal          syslog.5.gz        vmware-network.5.log
+boot.log.2        dmesg.1.gz     kern.log         syslog.6.gz        vmware-network.6.log
+
+```
+
+syslogd服务的作用是所有要去写系统日志的用户都需要把自己要写的系统日志syslogd服务，然后由这项服务再去进行统一的系统日志的输入，所以只需要按照一定的函数接口把要写的内容提交到syslogd就可以了，这就相当于做了一个授权分离，root用户，把自己写日志的权限交给了syslogd，然后syslogd采集所有的内容，所以只有syslogd有权限写系统日志
+
+```shell
+liangruuu@liangruuu-virtual-machine:/var/log$ ps axj | grep syslogd
+
+# result
+1     961     961     961 ?             -1 Ssl    104   0:00 /usr/sbin/rsyslogd -n -iNONE
+```
+
+> NAME
+>
+> > closelog, openlog, syslog, vsyslog - send messages to the system logger
+>
+> SYNOPSIS
+>
+> > #include <syslog.h>
+> >
+> > void openlog(const char *ident, int option, int facility);
+> > void syslog(int priority, const char *format, ...);
+> > void closelog(void);
+> >
+> > void vsyslog(int priority, const char *format, va_list ap);
+>
+> 1. openlog：与syslogd实现关联，第一个参数表示给定字段；第二个参数表示有无特殊要求；第三个参数表示系统日志的来源；openlog没有返回值意味这这个函数不会出错
+> 2. syslog：提交内容；第一个参数表示级别，意味着日志的重要程度；第二个参数表示提交日志的具体内容；第三个为变参
+> 3. closelog：断开与syslogd服务的链接
+>
+> 
+> 
+
+1. void openlog：习惯性设置LOG_PID把进程ID挂载到链接上，这样就可以通过进程树关系来查看当前所需内容;；并且消息的来源只有固定的几种，不能随便自定义来源
+
+> DESCRIPTION
+>
+> > Values for option
+> >
+> > ​	The option argument to openlog() is a bit mask constructed by ORing together any of the following values:
+> >
+> > ​		LOG_PID        Include the caller's PID with each message.
+> >
+> > ​		...
+> >
+> > Values for facility
+> >
+> > ​	LOG_DAEMON     system daemons without separate facility value
+> >
+> > ​	LOG_FTP        ftp daemon
+> >
+> > ​	...
+>
+> 
+
+2. void syslog：根据当前内容来选择所要提交内容的级别，一般情况下ERR会作为分界线，如果当前造成的错误导致进程没有必要运行下去了就选择ERR以及以上的内容，否则选择WARNING以下的内容
+
+>DESCRIPTION
+>
+>> Values for level
+>>
+>> ​	This determines the importance of the message.  The levels are, in order of decreasing importance:
+>>
+>> ​		LOG_ERR        error conditions
+>>
+>> ​		LOG_WARNING    warning conditions
+>>
+>> ​		LOG_NOTICE     normal, but significant, condition
+>>
+>> ​		LOG_INFO       informational message
+>>
+>> ​		LOG_DEBUG      debug-level message
+>>
+>> ​		......
+>
+>
+
+* 使用syslogd服务重构之前的守护进程代码
+
+```c
+#include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
+#include<sys/types.h>
+#include<sys/stat.h>
+#include<fcntl.h>
+#include<unistd.h>
+#include <syslog.h>
+#include<errno.h>
 
 
-这个守护进程代码还有一个缺陷就是
+#define FNAME "/tmp/out"
 
 
+static int daemonize(void)
+{
+    int fd;
+    pid_t pid;
+    pid = fork();
+    if(pid <0)
+    {
+        exit(1);
+    }
+    if(pid >0)
+        exit(0);
+
+    fd = open("/dev/null", O_RDWR);
+    if(fd < 0)
+    {
+        return -1;
+    }
+    // 标准流重定向到“黑洞”，即在终端不显示
+    dup2(fd, 0);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    if(fd > 2)
+        close(fd);
+
+    setsid();
+    chdir("/");
+    // umask(0);
+
+    return 0;
+}
+
+int main()
+{
+    FILE *fp;
+
+    openlog("mydaemon", LOG_PID, LOG_DAEMON);
 
 
+    if(daemonize())
+    {
+        syslog(LOG_ERR, "daemonize() failed!");
+    }
+    else
+    {
+        syslog(LOG_INFO, "daemonize() successded!");
+    }
+    
+
+    fp = fopen(FNAME, "w");
+    if(fp == NULL)
+    {
+        syslog(LOG_ERR, "fopen():%s", strerror(errno));
+        exit(1);
+    }
+
+    syslog(LOG_INFO, "%s was opened.", FNAME);
+
+    for(int i = 0; ; i++ )
+    {
+        fprintf(fp, "%d\n", i);
+        fflush(fp);
+        syslog(LOG_DEBUG, "%d is printed.", i);
+        sleep(1);
+    }
+
+    fclose(fp);
+    closelog();
 
 
-
-
-
-
-
-
+    exit(0);
+}
+```
 
 
 
