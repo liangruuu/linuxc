@@ -1866,11 +1866,171 @@ sys:*:19046:0:99999:7:::
 ......
 ```
 
+# 进程-守护进程
+
+后台一直在跑的进程被称为守护进程，比如httpd、dhcp、ssh...守护进程一般满足这样的条件：
+
+1. 脱离控制终端，因为控制终端上的输入输出会对守护进程产生印象，以及可以发送一个信号给这个进程从而影响进程的使用
+2. 是一个会话的leader，是一个进程组的leader
+
+会话：一个终端的登录就会产生一个标准的会话session，session的标识为sid，在当前shell登陆之后可能会存在很多进程组，一个进程组中包括一个以上的进程，一个进程中至少会有一个线程在运行。比如执行`ls | more`命令，实际上就在一个进程组里产生了2个进程，即把一个进程的输出作为另一个进程的输入，然后需要搞清楚两个概念：前台进程组和后台进程组，规定最多只能有一个前台进程组或者甚至没有前台进程组，所有的进程组全部在后台运行，前台进程组能够接受标准的输入输出，而后台进程组则不行。假设不区分前台后台进程组的话，比如都作为前台进程组在前台运行，那么在键盘上输入的内容就无法确认是给哪个进程组了，并且如果企图把标准输入的内容给运行在后台的进程的话，那么这个做法将会杀死这个进程。所以对于守护进程而言，我们会把它的输入输出一类的标准IO给重定向
+
+>NAME
+>
+>> setsid - creates a session and sets the process group ID
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <unistd.h>
+>>
+>> pid_t setsid(void);
+>
+>1. pid_t setsid(void)：创建一个新的会话，当前仅当当前调用这个函数的进程不是一个进程组的leader。并且当前调用setsid函数的进程将会成为这个session的leader，会成为当前新的进程组的leader，并且脱离控制终终端
+>
+>DESCRIPTION
+>
+>> setsid()  creates  a new session if the calling process is not a process group leader.  The calling process is the leader
+>> of the new session (i.e., its session ID is made the same as its process ID).   The  calling  process  also  becomes  the process  group  leader  of a new process group in the session (i.e., its process group ID is made the same as its process ID).
+>
+>
+>
+
+1. 一个进程产生子进程，则子进程天生和父进程是同组进程，但是父进程是作为组长身份出现的也就是父进程将会是group的leader，也就是说setsid这个函数不能由父进程来调用；setsid所得到的结论就是一个守护进程的特点
+
+```shell
+root@liangruuu-virtual-machine:/home/liangruuu# ps axj
+
+# result
+   PPID     PID    PGID     SID TTY        TPGID STAT   UID   TIME COMMAND
+      0       1       1       1 ?             -1 Ss       0   0:01 /sbin/init splash
+      0       2       0       0 ?             -1 S        0   0:00 [kthreadd]
+      2       3       0       0 ?             -1 I<       0   0:00 [rcu_gp]
+      2       4       0       0 ?             -1 I<       0   0:00 [rcu_par_gp]
+      2       6       0       0 ?             -1 I<       0   0:00 [kworker/0:0H-kblockd]
+      2       7       0       0 ?             -1 I        0   0:02 [kworker/0:1-events]
+      2       9       0       0 ?             -1 I<       0   0:00 [mm_percpu_wq]
+      2      10       0       0 ?             -1 S        0   0:00 [rcu_tasks_rude_]
+      2      11       0       0 ?             -1 S        0   0:00 [rcu_tasks_trace]
+      2      12       0       0 ?             -1 S        0   0:00 [ksoftirqd/0]
+      
+   1422    1530    1200    1200 tty2        1200 Z+    1000   0:00 [fcitx] <defunct>
+
+...
+```
+
+守护进程脱离控制终端，所以守护进程的TTY一列所表示的一个问号，tty2这个就叫做不脱离控制终端；执行setsid函数之后，当前进程会成为一个session的leader，会成为group的leader，所以SID、PGID应该和当前进程ID号一致；一个进程一定会有一个父进程，但是守护进程不太一样，setsid必须是非leader进程（子进程）才能调用，调用完之后按照之前的逻辑父进程在子进程运行的时候要wait等子进程执行完之后才去收尸，可是守护进程是不需要被wait的，因为其是很难停止执行的，所以父进程会一直wait。所以既然必须得子进程来调用setsid，所以在子进程调用setsid函数的时候父进程直接退出，也就是说守护进程不需要被收尸。如果父进程退出了的话，那么当前守护进程的父进程PPID值就为1
+
+```shell
+# result
+
+1    1550    1550    1550 ?             -1 Ssl    120   0:00 /usr/bin/whoopsie -f
+1    1556    1556    1556 ?             -1 Ss     116   0:00 /usr/sbin/kerneloops --test
+1    1565    1565    1565 ?             -1 Ss     116   0:00 /usr/sbin/kerneloops
+```
+
+上面的这三个进程就是典型的守护进程，因为其PPID值为，并且PID、PGID、SID三个ID值相同，而且脱离控制终端
+
+* 实现守护进程：首先实现一个守护进程，然后让这个进程去执行某个任务，比如让这个守护进程持续地像一个文件输出数字
+
+```c
+#define FNAME "/tmp/out"
+
+int main()
+{
+    FILE *fp;
+    if (daemonize())
+        exit(1);
+
+    fp = fopen(FNAME, "w");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    for (int i = 0;; i++)
+    {
+        fprintf(fp, "%d\n", i);
+        fflush(fp);
+        sleep(1);
+    }
+
+    exit(0);
+}
+```
+
+* 1：在这个程序中命令行是无法使用的，因为守护进程将来会脱离控制终端，那么命令行的argv参数就没用了，所以需要在程序中定义一个全局的文件名
+* 6-7：如果daemonize函数返回值为非零值则表示创建守护进程异常
+* 12：这行其实是错误的，因为守护进程已经脱离了控制终端，但是perror函数还是在往终端显示数据，之后需要二次更改这行代码的逻辑
+* 16-21：每秒向文件fp写数字，因为fprintf函数是行缓冲模式，但是文件是全缓冲模式，所以需要调用fflush函数刷新缓冲区
+
+```c
+static int daemonize(void)
+{
+    int fd;
+    pid_t pid;
+    pid = fork();
+    if (pid < 0)
+    {
+        perror("fork()");
+        exit(1);
+    }
+    if (pid > 0)
+        exit(0);
+
+    fd = open("/dev/null", O_RDWR);
+    if (fd < 0)
+    {
+        perror("open()");
+        return -1;
+    }
+    // 标准流重定向到“黑洞”，即在终端不显示
+    dup2(fd, 0);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    if (fd > 2)
+        close(fd);
+
+    setsid();
+    chdir("/");
+    // umask(0);
+
+    return 0;
+}
+```
+
+* 27：最主要的目的就是调用setsid函数，因为这个函数实现的就是守护进程的特点，而且还不能是当前线程调用，应该是子线程去调用这个函数
+* 8，17：跟上面一段代码的第12行代码是同样的错误逻辑
+* 11-12：如果是父进程就让其正常结束而非wait，这需要区别与之前写的few代码
+* 21-23：因为守护进程是脱离了控制终端的，所以0、1、2这三个文件描述符就没有必要去关联设备，所以把空设备fd重定向到这三个文件描述符
+* 28：改变工作路径，防止跟其他进程冲突
+* 29：可选项，如果能确保程序不会产生文件就可以关掉umask值
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic/daemon$ ./mydaemon 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/process_basic/daemon$ 
+
+# result
+1129    5635    5635    5635 ?             -1 Ss    1000   0:00 ./mydaemon
+
+# /tmp/out
+
+0
+1
+2
+3
+4
+5
+6
+7
+8
+...
+```
 
 
 
-
-
+这个守护进程代码还有一个缺陷就是
 
 
 
