@@ -1136,23 +1136,719 @@ int main(int argc, char **argv)
 
 alarm_handler函数每秒会执行一次，也就是说token会每秒从0自累加一次，假定当前token值为0，执行到56行的时候进入pause等待，一直等到有信号来打断pause函数，pause函数被打断的时候token已经在alarm_handler函数中被类加了一次，所以token值不小于等于0，所以跳出循环执行之后的逻辑。假设当前文件流中没有内容，即read函数就会被阻塞住，当1秒钟时钟信号到来，tokne会从0变为1，并且read作为一个阻塞系统调用会被信号打断，第62行代码判断如果是被信号打断的话就会继续执行while read操作，如果这时还没有数据的话就继续阻塞，等待着下一秒的时钟信号的到来，token自增由1变为2，再被打断以此类推......当token值变为3的时候就相当于当前进程被read函数阻塞了3秒，假设这个时候文件流有数据流出，这时就会读10个字节然后立马写10个字节，再回去判断token是否小于等于0，因为此时token值为3，不满足循环条件，所以就不会进入循环，随后token自减变为了2，然后再去执行read操作读取10个字节，随后立马写10个字节，以此类推，直到tokne值自减为0就进入while循环执行pause函数阻塞直到信号的到来。这个过程不是一次性处理30个字节，而是一次性处理10个字节，连续处理3次，所以之前等待的3秒其实不是白等，而是在攒token以便之后短时间能传输更多的数据
 
+# 信号-令牌桶封装成库实例
+
+把令牌桶提供的方法写在mytbf.h文件中，把实现写在mytbf.c文件中，用户在main.c文件中就可以调用令牌桶的库来完成一个流控算法
+
+用户如果要进行一个程序当中多个不同速率的流量控制的时候应该如何去做？
+
+用户需要指定不同的流速，也就是之前代码中的CPS字段；而每个令牌桶肯定会有一个上限BURST；需要有个变量来存放令牌数，这三个变量就组成了令牌桶的三要素，那么就在.h文件中声明方法来帮助用户控制这三个数据
+
+之前的代码中是一个tokne对应10个字节，现在为了防止不停地进行数值之间的换算，用一个token对应一个字节。比如说CPS为10，之前的代码中是每秒钟token自增1，但是现在因为一个tokne对应1个字节，所以变成了每秒token+=CPS
+
+假设把文件A的内容拷贝到文件B中，每秒钟传输10个字节，桶的上限是100；把文件C的内容拷贝到文件D中，每秒钟传输50个字节，桶的上限是5000，那么就可以设置三个属性值为对应的数值
+
+用户可能需要多个令牌桶，则需要把令牌桶全部都存储起来，所以可以使用数组来存放
+
+<img src="index3.assets/image-20220325094621045.png" alt="image-20220325094621045" style="zoom:80%;" />
+
+```c
+// mytbf.h
+
+#ifndef _MYTBF_H_
+#define _MYTBF_H_
+
+#define MYTBF_MAX 1024
+
+mytbf_init(int cps, int burst);
+
+#endif
+```
+
+* 6：定义令牌桶种类的上限，也就是说能支持1024个不同容量的令牌桶
+* 8：令牌桶交给用户初始化，需要用户指定每秒传输的字节个数cps以及桶容量上限burst，返回值应该是结构体类型数据数组的起始地址，正如上面这张图所展示的那样
+
+结合面向对象的编程方式，要把数据结构存放在.c文件中，因为不希望被用户看到，也就是.h文件中的内容会被用户所使用到，.c文件会被编译连接成动态库或者是静态库
+
+```c
+// mytbf.c
+
+#include "mytbf.h"
+
+struct mytbf_st
+{
+    int cps;
+    int burst;
+    int token;
+};
+```
+
+所以在.h文件中就就应该返回给用户一个mytbf_st类型的的结构体的起始地址
+
+```c
+struct mytbf_st *mytbf_init(int cps, int burst);
+```
+
+但是因为数据类型是定义在.c文件中的，是隐藏起来不给用户看到的，所以这里可以使mytbf_init函数的返回值为void*，因为任何类型的指针赋值给void都是正确的，所以更改之后的代码结构为：
+
+```c
+// mytbf.h
+
+#ifndef _MYTBF_H_
+#define _MYTBF_H_
+
+#define MYTBF_MAX 1024
+
+typedef void mytbf_t;
+
+mytbf_t *mytbf_init(int cps, int burst);
+
+#endif
+
+
+// mytbf.c
+
+#include "mytbf.h"
+
+struct mytbf_st
+{
+    int cps;
+    int burst;
+    int token;
+    int pos;
+};
+```
+
+* 24：因为令牌桶是存放在数组中的，所以需要有一个属性pos来标记该令牌桶是存放在数组中的第几个位置的
+
+```c
+// mytbf.h
+
+#ifndef _MYTBF_H_
+#define _MYTBF_H_
+
+#define MYTBF_MAX 1024
+
+typedef void mytbf_t;
+
+mytbf_t *mytbf_init(int cps, int burst);
+
+int mytbf_fetchtoken(mytbf_t *, int);
+
+int mytbf_returntoken(mytbf_t *, int);
+
+int mytbf_destroy(mytbf_t *);
+
+#endif
+```
+
+* 16：init函数会申请空间，所以需要一个释放空间的函数，做的是一个free类型的操作
+
+* 12：从mytbf_t *类型数据中获取第二个参数所代表的令牌数，以返回值形式告知最终真实获取了多少个令牌。比如说第二个参数为100，则表示要取100个令牌，但是返回值为50，则表示实际上获取了50个令牌数
+
+* 14：有剩余未被使用的令牌，则需要往mytbf_t结构体中归还第二个参数代表的token数量，返回值表示实际上归还的token数
+
+更改main函数的逻辑，main程序的内容就是作为用户之后的操作
+
+```c
+// main.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#include "mytbf.h"
+
+#define CPS     10
+#define BUFSIZE 1024
+#define BURST 100
+
+
+int main(int argc, char **argv)
+{
+    int sfd, dfd = 1;
+    int len = 0;
+    int ret = 0;
+    int pos = 0;
+    int size = 0;
+    char buf[BUFSIZE];
+    mytbf_t *tbf;
+
+    if(argc < 2)
+    {   
+        fprintf(stderr, "Usage:%s <src_file>\n",argv[0]);
+        exit(1);
+    }
+
+    tbf = mytbf_init(CPS, BURST);
+    if(tbf == NULL)
+    {
+        fprintf(stderr, "mytbf_init() failed!\n");
+        exit(1);
+    }
+
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if(sfd < 0)
+        {
+            if(errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    }while (sfd < 0);
+    
+
+    while(1)
+    {
+        size = mytbf_fetchtoken(tbf, BUFSIZE);
+        if(size < 0)
+        {
+            fprintf(stderr, "mytbf_fetchtoken():%s\n", strerror(-size));
+            exit(1);
+        }
+
+        while((len = read(sfd, buf, size)) < 0)
+        {
+            if(errno == EINTR)
+                continue; 
+            perror("read()");
+            break;
+        }
+
+        if(len == 0)
+            break;
+
+        if(size - len > 0)
+            mytbf_returntoken(tbf, size - len);
+
+        pos = 0;
+        while(len > 0)
+        {
+            // printf("pos=%d len=%d\n", pos, len);
+            ret = write(dfd, buf + pos, len);
+            // printf("ret=%d\n", ret);
+            if(ret < 0)
+            {
+                if(errno == EINTR)
+                    continue; 
+                perror("write()");
+                exit(1);
+            }
+            pos += ret;
+            len -= ret;
+        }
+        
+    }
+
+    close(sfd);
+
+    mytbf_destroy(tbf);
+
+    exit(0);
+}
+
+```
+
+* 12：删除所有关于令牌桶的逻辑函数，而从mytbf.h中调用
+* 35：在所有的内容实现之前首先需要调用mytbfinit函数，参数是用户自定义的，返回值需要用一个mytbfinit类型的指针接收
+* 100：调用mytbf_destroy函数销毁申请的tbf令牌桶
+* 58：进程能否读数据取决于还有没有令牌剩余，所以这行代码的作用从tbf结构数据中过去1024个令牌，但实际上能获得size个token，所以第65行代码只能读取size个字节
+* 76-77：在即将向文件写数据之前先判断当前获取到的token是否被全部使用完，比如说在读取文件的过程中，最后一次读取时文件末尾只有3个字节没有被读取，但是却获得了10个token，也就是说剩余7个token，之前读文件的时候消耗了len个tokne，所以这里需要归还size-len个令牌
+
+```c
+// mybtf.c
+
+static struct mytbf_st* job[MYTBF_MAX];
+
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+
+    int pos = get_free_pos();
+    if(pos < 0)
+        return NULL;
+
+    me = malloc(sizeof(*me));
+    if(me == NULL)
+        return NULL;
+
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+    me->pos = pos;
+    job[pos] = me;
+
+    return me;
+}
+
+
+static int get_free_pos(void)
+{
+    for(int i = 0; i < MYTBF_MAX; i++)
+    {
+        if(job[i] == NULL)
+            return i;
+    }
+
+    return -1;
+}
+```
+
+* 14-24：初始化结构体，并且给对应属性赋值，因为按照之前的那张图，我们需要把不同种类的令牌桶结构体存入一个数组中，所以需要把当前结构体存入数组的对应位置
+* 3：定义结构体指针数组的全局变量，一共可以装下1024个不同的令牌桶
+* 10，28-37：get_free_pos函数意为找到数组中的一个空位置以供存放该令牌桶
+
+```c
+// mytbf.c
+
+int mytbf_destroy(mytbf_t *ptr)
+{
+    
+    struct mytbf_st *me = ptr;
+    job[me->pos] = NULL;
+    free(ptr);
+}
+```
+
+* 3-9：释放令牌桶空间，并且把存放该令牌桶的数组对应位置置空
+
+```c
+// mytbf.c
+
+int mytbf_fetchtoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+    int n;
+    
+    if(size <= 0)
+        return -EINVAL;
+
+    while(me->token <= 0)
+        pause();
+
+    n = min(me->token, size);
+    me->token -= n; 
+
+    return n;
+}
+
+static int min(int a, int b)
+{
+    if(a < b)
+        return a;
+    return b;
+}
+```
+
+* 8-9：如果用户所要token数是小于等于0的话就返回错误，EINVAL是标准出错函数中的其中一个变量，意为参数非法，因为EINVAL是一个正数，所以我们让其返回负数
+* 11-14：如果有token的话，就在size和token值中选取最小值，如果小于等于0则应该等待新的token被产生，这就是一种阻塞的实现，用户获取到令牌之后，桶内的令牌数就相对应的减少，函数返回实际获得到的token数n
+
+```c
+// mytbf.c
+
+int mytbf_returntoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+
+    if(size <= 0)
+        return -EINVAL;
+
+    me->token += size;
+    if(me->token > me->burst)
+        me->token = me->burst;
+
+    return size;
+}
+```
+
+* 11-14：不能超额归还token，返回用户所归还的token数，注意这里返回的是size，也就是用户归还的token数，而不是burst-size对应的实际归还数，比如用户归还了10个token，但是桶剩余空间只有1个，则不能返回1，而是返回size，因为用户确实是归还了10个，实际归还1个不是用户的问题
+
+至此关键的四个函数`mytbf_init`、`mytbf_fetchtoken`、`mytbf_returntoken`、`mytbf_destroy`的大致逻辑已经编写完毕，但是还未触及核心逻辑，即找不到位置来发出第一个alarm信号，也找不到位置写signal函数
+
+```c
+signal(SIGALRM, alarm_handler);
+alarm(1);
+```
+
+信号处理函数alarm_handler中应该有的逻辑是遍历数组，给每一个存放在数组里的令牌桶中的token元属性都增加CPS值
+
+我们应该在init函数中添加对signal和alarm函数的定义，并且定义信号处理函数alarm_handler
+
+```c
+// mytbf.c
+
+static int inited = 0;
+
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+    if(!inited)
+    {
+        module_load();
+        inited = 1;
+    }
 
 
 
+    int pos = get_free_pos();
+    if(pos < 0)
+        return NULL;
+
+    me = malloc(sizeof(*me));
+    if(me == NULL)
+        return NULL;
+    
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+    me->pos = pos;
+    job[pos] = me;
+
+    return me;
+}
+
+
+static void alarm_handler(int s)
+{
+    alarm(1);
+    for (int i = 0; i < MYTBF_MAX; i++)
+    {
+        if(job[i] != NULL)
+        {
+            job[i]->token += job[i]->cps;
+            if(job[i]->token > job[i]->burst)
+                job[i]->token = job[i]->burst;
+        }
+    }
+    
+}
+
+
+static void module_load(void)
+{
+    alarm_handler_save = signal(SIGALRM, alarm_handler);
+    alarm(1);
+
+    // 钩子函数，程序结束前最后执行
+    atexit(module_unload);
+}
+
+
+static void module_unload(void)
+{
+    signal(SIGALRM, alarm_handler_save);
+    alarm(0);
+    for (int i = 0; i < MYTBF_MAX; i++)
+        free(job[i]);
+}
+
+typedef void (*sighandler_t)(int);
+
+static __sighandler_t alarm_handler_save;
+```
+
+* 8-12：只能进行一次初始化signal和alarm函数操作，因为之前说过在一个程序中不能声明多个alarm函数，否则程序会出错，所以当进行过一次初始化之后就把inited的值置为1，以此来限制初始化次数
+* 60-66：进程在某个时刻异常结束了，则应该把当前还没来得及释放的令牌桶都释放掉；第二点是因为时钟信号只是这个小模块会被用到的功能，可能出了这个程序其他模块用不到时钟信号，但是如果没有执行unload操作的话，那么系统还是会每隔1秒发送一个信号，所以需要关闭时钟信号来防止对其他模块程序造成影响
+
+* 52，62：signal的返回值应该用sighandler_t类型来保存，返回值表示的是在给一个信号定义一个新的行为的时候返回的旧行为，所以需要在load时保存旧行为，在执行unload的时候把信号对应行为替换回旧行为
+
+完整代码：
+
+```c
+// mybtf.h
+
+#ifndef _MYTBF_H_
+#define _MYTBF_H_
+
+#define MYTBF_MAX 1024
+
+typedef void mytbf_t;
+
+mytbf_t *mytbf_init(int cps, int burst);
+
+int mytbf_fetchtoken(mytbf_t *, int);
+
+int mytbf_returntoken(mytbf_t *, int);
+
+int mytbf_destroy(mytbf_t *);
+
+#endif
+```
+
+```c
+// mytbf.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+
+#include "mytbf.h"
+
+typedef void (*sighandler_t)(int);
+
+static struct mytbf_st* job[MYTBF_MAX];
+
+static int inited = 0;
+
+static __sighandler_t alarm_handler_save;
+
+struct mytbf_st
+{
+    int cps;
+    int burst;
+    int token;
+    int pos;
+};
+
+static void alarm_handler(int s)
+{
+    alarm(1);
+    for (int i = 0; i < MYTBF_MAX; i++)
+    {
+        if(job[i] != NULL)
+        {
+            job[i]->token += job[i]->cps;
+            if(job[i]->token > job[i]->burst)
+                job[i]->token = job[i]->burst;
+        }
+    }
+    
+}
+
+static void module_unload(void)
+{
+    signal(SIGALRM, alarm_handler_save);
+    alarm(0);
+    for (int i = 0; i < MYTBF_MAX; i++)
+        free(job[i]);
+}
+
+static void module_load(void)
+{
+    alarm_handler_save = signal(SIGALRM, alarm_handler);
+    alarm(1);
+
+    // 钩子函数，程序结束前最后执行
+    atexit(module_unload);
+}
+
+static int min(int a, int b)
+{
+    if(a < b)
+        return a;
+    return b;
+}
+
+static int get_free_pos(void)
+{
+    for(int i = 0; i < MYTBF_MAX; i++)
+    {
+        if(job[i] == NULL)
+            return i;
+    }
+
+    return -1;
+}
+
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+    if(!inited)
+    {
+        module_load();
+        inited = 1;
+    }
 
 
 
+    int pos = get_free_pos();
+    if(pos < 0)
+        return NULL;
+
+    me = malloc(sizeof(*me));
+    if(me == NULL)
+        return NULL;
+    
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+    me->pos = pos;
+    job[pos] = me;
+
+    return me;
+}
+
+int mytbf_fetchtoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+    int n;
+    
+    if(size <= 0)
+        return -EINVAL;
+
+    while(me->token <= 0)
+        pause();
+
+    n = min(me->token, size);
+    me->token -= n; 
+
+    return n;
+}
+
+int mytbf_returntoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+
+    if(size <= 0)
+        return -EINVAL;
+
+    me->token += size;
+    if(me->token > me->burst)
+        me->token = me->burst;
+
+    return size;
+}
+
+int mytbf_destroy(mytbf_t *ptr)
+{
+    
+    struct mytbf_st *me = ptr;
+    job[me->pos] = NULL;
+    free(ptr);
+}
+```
+
+```c
+// main.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#include "mytbf.h"
+
+#define CPS     10
+#define BUFSIZE 1024
+#define BURST 100
 
 
+int main(int argc, char **argv)
+{
+    int sfd, dfd = 1;
+    int len = 0;
+    int ret = 0;
+    int pos = 0;
+    int size = 0;
+    char buf[BUFSIZE];
+    mytbf_t *tbf;
 
+    if(argc < 2)
+    {   
+        fprintf(stderr, "Usage:%s <src_file>\n",argv[0]);
+        exit(1);
+    }
 
+    tbf = mytbf_init(CPS, BURST);
+    if(tbf == NULL)
+    {
+        fprintf(stderr, "mytbf_init() failed!\n");
+        exit(1);
+    }
 
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if(sfd < 0)
+        {
+            if(errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    }while (sfd < 0);
+    
 
+    while(1)
+    {
+        size = mytbf_fetchtoken(tbf, BUFSIZE);
+        if(size < 0)
+        {
+            fprintf(stderr, "mytbf_fetchtoken():%s\n", strerror(-size));
+            exit(1);
+        }
 
+        while((len = read(sfd, buf, size)) < 0)
+        {
+            if(errno == EINTR)
+                continue; 
+            perror("read()");
+            break;
+        }
 
+        if(len == 0)
+            break;
 
+        if(size - len > 0)
+            mytbf_returntoken(tbf, size - len);
 
+        pos = 0;
+        while(len > 0)
+        {
+            // printf("pos=%d len=%d\n", pos, len);
+            ret = write(dfd, buf + pos, len);
+            // printf("ret=%d\n", ret);
+            if(ret < 0)
+            {
+                if(errno == EINTR)
+                    continue; 
+                perror("write()");
+                exit(1);
+            }
+            pos += ret;
+            len -= ret;
+        }
+        
+    }
 
+    close(sfd);
+
+    mytbf_destroy(tbf);
+
+    exit(0);
+}
+
+```
+
+因为涉及到.h文件，所以使用makefile来编译项目，从结果中也可以看到不是处于盲等状态
+
+```makefile
+all:mytbf
+
+mytbf:main.o mytbf.o
+	gcc $^ -o $@
+
+clean:
+	rm -rf *.o mytbf
+
+```
+
+<img src="index3.assets/image-20220325130246410.png" alt="image-20220325130246410" style="zoom:80%;" />
 
 
 
