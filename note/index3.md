@@ -2025,6 +2025,176 @@ int main(void)
 }
 ```
 
+anytimer的具体实现需要学习后面的知识才能继续
+
+# setitime及相关函数
+
+
+
+alarm函数在进行计时的话，时间会控制地比较僵硬，只能以秒为单位进行计时，setitimer函数能提供更加精确的计时方式以及更多的时钟信号模式，所以之后如果要实现时钟相关功能的话就是用setitimer，而不是alarm
+
+>NAME
+>
+>> getitimer, setitimer - get or set value of an interval timer
+>
+>SYNOPSIS
+>
+>> #include <sys/time.h>
+>>
+>> int getitimer(int which, struct itimerval *curr_value);
+>> int setitimer(int which, const struct itimerval *new_value, struct itimerval *old_value);
+>
+>1. getitimer：获取时钟相关配置
+>2. setitimer：which值的是要设置哪个时钟，new_value为时钟周期，old_value指的是旧的时钟周期，setitimer可以控制到的秒的级别取决于结构体itimerval
+>
+>
+>
+>
+
+2. 系统提供了这么几个时钟
+
+> DESCRIPTION
+>
+> > ITIMER_REAL：实时递减，递减到0为止然后发出一个SIGALRM信号，这个模式刚好能替代之前的alarm函数
+> >
+> > ITIMER_VIRTUAL：虚拟时钟，同样也是倒计时，倒计时结束后会发送一个SIGVTALRM信号，只有当进程运行的时候才递减
+> >
+> > ......
+
+```c
+struct itimerval {
+    struct timeval it_interval; /* Interval for periodic timer */
+    struct timeval it_value;    /* Time until next expiration */
+};
+
+
+struct timeval {
+    time_t      tv_sec;         /* seconds */
+    suseconds_t tv_usec;        /* microseconds */
+};
+
+```
+
+* 2-3：it_interval指的是周期，it_value指的是递减的值，当it_value的值递减为0时，该发哪个信号就发哪个信号，并且把it_interval的值赋给it_value
+* 7-10：it_interval和it_value的类型是秒和微秒级别的单位
+
+setitimer函数最大的好处就是误差不累计，这一点对于长期运行的程序而言非常重要
+
+刚才说到当it_value为0的时候发信号，并且此时it_interval的值会原封不动地赋值给it_value，也就是说setitimer函数本身就能构成一个时钟周期，所以不用再去实现一个alarm链了，即不用在信号处理函数中再调用一次alarm函数了
+
+```c
+// slowcat3.c
+
+#include<stdio.h>
+#include<stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+
+#define CPS     10
+#define BUFSIZE CPS
+
+static volatile int loop = 0;
+
+static void alarm_handler(int s)
+{
+    // alarm(1);
+    loop = 1;
+}
+
+int main(int argc, char **argv)
+{
+    int sfd, dfd = 1;
+    int len = 0;
+    int ret = 0;
+    int pos = 0;
+    char buf[BUFSIZE];
+    struct itimerval itv;
+
+    if(argc < 2)
+    {   
+        fprintf(stderr, "Usage:%s <src_file>\n",argv[0]);
+        exit(1);
+    }
+
+    signal(SIGALRM, alarm_handler);
+    // alarm(1);
+    itv.it_interval.tv_sec = 1;
+    itv.it_interval.tv_usec = 0;
+    itv.it_value.tv_sec = 1;
+    itv.it_value.tv_usec = 0;
+    if(setitimer(ITIMER_REAL, &itv, NULL) < 0)
+    {
+        perror("setitimer()");
+        exit(1);
+    }
+
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if(sfd < 0)
+        {
+            if(errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    }while (sfd < 0);
+    
+
+    while(1)
+    {
+        while(!loop)
+            pause();
+        loop = 0;
+
+        while((len = read(sfd, buf, BUFSIZE)) < 0)
+        {
+            if(errno == EINTR)
+                continue; 
+            perror("read()");
+            break;
+        }
+
+        if(len == 0)
+            break;
+
+
+        pos = 0;
+        while(len > 0)
+        {
+            ret = write(dfd, buf + pos, len);
+            if(ret < 0)
+            {
+                if(errno == EINTR)
+                    continue; 
+                perror("write()");
+                exit(1);
+            }
+            pos += ret;
+            len -= ret;
+        }
+        
+    }
+
+    close(sfd);
+
+    exit(0);
+}
+
+```
+
+
+
+
+
+
+
 
 
 
