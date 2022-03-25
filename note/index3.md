@@ -1025,3 +1025,142 @@ while ((len = read(sfd, buf, BUFSIZE)) < 0)
 }
 ```
 
+# 信号-令牌桶实例
+
+针对之前的漏桶算法的实现更希望达到这样的效果：如果数据量突然激增，需要立马处理掉其中的一部分数据，其实当先前程不应该处于空闲的状态，因为目前规定的是loop一秒钟改变一次，读写一次是10个字节，说明可以理解成当前进程其实是有权限一秒传输10个字节的，但其实应该攒下这个权限，比如说当前读取设备上没有数据，那么当前进程就闲置了比如说3秒，即这3秒的时间内可以攒下读写30个字节的权限，程序做成这样就比较灵活了。计算机上的数据在进行传输的时候不会像小河流水一样，读也好写也好，之前强调过buffer和cache的机制，即有可能写数据到缓冲区中，然后执行刷新操作就会把所有的数据都刷离缓冲区，内存中对于字节流、数据流的操作就是要么不来，要来就来一堆，所以数据是一堆一堆过来的
+
+所以漏桶这样的一个实例，放在实际的应用上的话，应用的范围会比较窄一点，应用广一点的算法叫做：令牌桶算法，如果进程处于闲置状态就攒权限，比如说闲置3秒，就攒下了传输30个字节的权限，如果有一大波数据传过来就可以把其中的30个字节解决掉，此时这个权限就被用完了，之后就只能每秒10个字节地传输数据
+
+* 令牌桶实现代码
+
+```c
+// slowcat2.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+
+#define CPS 10
+#define BUFSIZE CPS
+#define BURST 100
+
+static volatile sig_atomic_t token = 0;
+
+static void alarm_handler(int s)
+{
+    alarm(1);
+    token++;
+    if (token > BURST)
+        token = BURST;
+}
+
+int main(int argc, char **argv)
+{
+    int sfd, dfd = 1;
+    int len = 0;
+    int ret = 0;
+    int pos = 0;
+    char buf[BUFSIZE];
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage:%s <src_file>\n", argv[0]);
+        exit(1);
+    }
+
+    signal(SIGALRM, alarm_handler);
+    alarm(1);
+
+    do
+    {
+        sfd = open(argv[1], O_RDONLY);
+        if (sfd < 0)
+        {
+            if (errno != EINTR)
+            {
+                perror("open()");
+                exit(1);
+            }
+        }
+    } while (sfd < 0);
+
+    while (1)
+    {
+        while (token <= 0)
+            pause();
+        token--;
+
+        while ((len = read(sfd, buf, BUFSIZE)) < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            perror("read()");
+            break;
+        }
+
+        if (len == 0)
+            break;
+
+        pos = 0;
+        while (len > 0)
+        {
+            ret = write(dfd, buf + pos, len);
+            if (ret < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                perror("write()");
+                exit(1);
+            }
+            pos += ret;
+            len -= ret;
+        }
+    }
+
+    close(sfd);
+
+    exit(0);
+}
+
+```
+
+* 14：因为不再是漏桶模式，即当前进程不要被一直循环而处于闲置状态，所以需要把循环值改为令牌值
+* 12：定义一个令牌桶承载数据大小的上限，即当前进程最多能攒下传输100个字节数据的权限
+* 19-21：下一次时钟信号到来的时候就不再是loop的值置为1，而是把token的值自增
+* 56-58：因为没有loop概念，所以需要改变loop逻辑为token逻辑；读写一次会消耗掉一个token，所以需要token自减
+
+alarm_handler函数每秒会执行一次，也就是说token会每秒从0自累加一次，假定当前token值为0，执行到56行的时候进入pause等待，一直等到有信号来打断pause函数，pause函数被打断的时候token已经在alarm_handler函数中被类加了一次，所以token值不小于等于0，所以跳出循环执行之后的逻辑。假设当前文件流中没有内容，即read函数就会被阻塞住，当1秒钟时钟信号到来，tokne会从0变为1，并且read作为一个阻塞系统调用会被信号打断，第62行代码判断如果是被信号打断的话就会继续执行while read操作，如果这时还没有数据的话就继续阻塞，等待着下一秒的时钟信号的到来，token自增由1变为2，再被打断以此类推......当token值变为3的时候就相当于当前进程被read函数阻塞了3秒，假设这个时候文件流有数据流出，这时就会读10个字节然后立马写10个字节，再回去判断token是否小于等于0，因为此时token值为3，不满足循环条件，所以就不会进入循环，随后token自减变为了2，然后再去执行read操作读取10个字节，随后立马写10个字节，以此类推，直到tokne值自减为0就进入while循环执行pause函数阻塞直到信号的到来。这个过程不是一次性处理30个字节，而是一次性处理10个字节，连续处理3次，所以之前等待的3秒其实不是白等，而是在攒token以便之后短时间能传输更多的数据
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
