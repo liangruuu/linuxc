@@ -2145,7 +2145,7 @@ int main(int argc, char **argv)
             }
         }
     }while (sfd < 0);
-    
+
 
     while(1)
     {
@@ -2179,7 +2179,7 @@ int main(int argc, char **argv)
             pos += ret;
             len -= ret;
         }
-        
+
     }
 
     close(sfd);
@@ -2189,19 +2189,174 @@ int main(int argc, char **argv)
 
 ```
 
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./slowcat3 /etc/services 
 
+# result
+# Network services, Internet style
+#
+# Note that it is presently the policy of IAN
+```
 
+# 信号集
 
+>NAME
+>
+>> sigemptyset, sigfillset, sigaddset, sigdelset, sigismember - POSIX signal set operations
+>
+>SYNOPSIS
+>
+>> #include <signal.h>
+>>
+>> int sigemptyset(sigset_t *set);
+>>
+>> int sigfillset(sigset_t *set);
+>>
+>> int sigaddset(sigset_t *set, int signum);
+>>
+>> int sigdelset(sigset_t *set, int signum);
+>>
+>> int sigismember(const sigset_t *set, int signum);
+>
+>1. sigset_t：信号集类型，它是一个typedef出来的整型类型数据，而这个整型的位数一定能囊括标准信号的个数，相当于用一个位图去映射当前系统所支持的信号
+>2. int sigemptyset(sigset_t *set)：把一个信号集的内容清空
+>3. int sigfillset(sigset_t *set)：把某个信号集置为全集，即这个集合包含所有的信号
+>4. int sigaddset(sigset_t *set, int signum)：往集合set中添加某个信号
+>5. int sigdelset(sigset_t *set, int signum)：从集合中删除掉某个信号
+>6. int sigismember(const sigset_t *set, int signum)：判断某个信号是否在集合set中
+>
+>
 
+* 信号屏蔽字/pending集的处理
 
+之前提过一个信号响应过程的流程图，在那张图中涉及到一个mask的概念，这个mask就是信号屏蔽字，sigprocmask函数就相当于给了一种人为的方式去控制mask
 
+接收到的信号是反映到pending位图上的，mask指的是当前信号的状态，比如说当前信号如果一开始就全部设置为0的话，那么其实收到哪个信号进程都看不到，也就是说任何信号都没法干扰到当前进程
 
+在之前讲信号的时候提到过信号的特点：信号什么时候到来进程是不知道的；信号的响应依赖于中断，如果没有中断这个机制，即使有信号到来进程还是看不到，sigprocmask函数就的作用就是"我们不能决定信号什么时候到来，但我们能使用这个函数去决定信号来的时候进程的状态，即信号什么时候被响应“
 
+>NAME
+>
+>> sigprocmask, rt_sigprocmask - examine and change blocked signals
+>
+>SYNOPSIS
+>
+>> #include <signal.h>
+>> int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+>
+>* 1. int sigprocmask(int how, const sigset_t *set, sigset_t *oldset)：第一个参数表示想要做什么；第二个参数表示how操作要针对的对象，即how这个操作是要针对于set中的所有信号的，比如说在set中放入三个信号，选择使用SIG_BLOCK作为第一个参数，意思为把三个信号的mask位置为0；第三个参数表示对mask值做how操作之前的set的状态
+>
+>
 
+1. how参数有下面几个选项
 
+>DESCRIPTION
+>
+>> SIG_BLOCK
+>>
+>> SIG_UNBLOCK
+>>
+>> SIG_SETMASK：必须有一个实现保存起来的set值才能进行恢复，即how字段选择了SIG_SETMASK的话，则恢复set值，并且保存恢复之前保存信号的情况
 
+* 使用信号集函数来实现之前的star.c程序：在打印一排5个星号期间不会有信号响应，即只是接收到但是不响应，但是要在两行星号之间响应
 
+```c
+// block.c
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+
+static void int_handler(int s)
+{
+    write(1, "!", 1);
+}
+
+int main()
+{
+    sigset_t set, oset, saveset;
+
+    signal(SIGINT, int_handler);
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+
+    for (int j = 0; j < 1000; j++)
+    {
+        sigprocmask(SIG_BLOCK, &set, NULL);
+        for (int i = 0; i < 5; i++)
+        {
+            write(1, "*", 1);
+            sleep(1);
+        }
+        write(1, "\n", 1);
+        sigprocmask(SIG_UNBLOCK, &set, NULL);
+    }
+
+    exit(0);
+}
+
+```
+
+* 23，30：因为不想在一行星号输出期间响应信号，所以需要在执行输出星号循环之前执行一段block程序，把把指定信号给阻塞住，阻塞住就相当于把信号的mask位暂时置为0，然后在打印完星号之后把mask置重新置成1，所以我们不能决定信号什么时候来，但是能决定信号什么时候被响应
+* 18-19：针对定义好的信号集set，需要把当前信号放到这个信号集里，至于如何放置，那就用上之前信号集的相关函数
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./block 
+
+# result
+*****
+*****
+*^C*^C***
+!*^C^C^C*^C^C^C^C^C^C*^C^C**
+!*^Z
+[1]+  Stopped                 ./block
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ 
+```
+
+可以看到在一行打印星号期间信号只是被接收，但是不响应，直到一行打印完毕之后才响应信号输出！，发出了这么多信号但是只被响应一次，这就是我们之前说到的标准信号丢失的原理
+
+* 使用SIG_SETMASK值重构代码
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+
+static void int_handler(int s)
+{
+    write(1, "!", 1);
+}
+
+int main()
+{
+    sigset_t set, oset, saveset;
+
+    signal(SIGINT, int_handler);
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigprocmask(SIG_UNBLOCK, &set, &saveset);
+
+    for (int j = 0; j < 1000; j++)
+    {
+        sigprocmask(SIG_BLOCK, &set, &oset);
+        for (int i = 0; i < 5; i++)
+        {
+            write(1, "*", 1);
+            sleep(1);
+        }
+        write(1, "\n", 1);
+        sigprocmask(SIG_SETMASK, &oset, NULL);
+    }
+    sigprocmask(SIG_SETMASK, &saveset, NULL);
+
+    exit(0);
+}
+
+```
+
+* 22，29：阻塞并且保存之前的状态，然后恢复之前的状态
 
 
 
