@@ -1850,6 +1850,181 @@ clean:
 
 <img src="index3.assets/image-20220325130246410.png" alt="image-20220325130246410" style="zoom:80%;" />
 
+# 信号-多任务计时器anytime实现
+
+* 实例：使用单一计时器，构造一组函数，实现任意数量的计时器
+
+在之前学习alarm函数的时候说到过：如果在程序中定义了多个alarm函数的话其实只有一个会生效，而且是最后一个
+
+```c
+// alarm.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main()
+{
+
+    alarm(10);
+    alarm(1);
+    alarm(5);
+
+    while (1)
+    {
+        pause();
+    };
+
+    exit(0);
+}
+
+```
+
+比如说微波炉，第一个人过来定了3分，第二个人过来定了5分钟，第三个人过来定了10分钟，其中这三个人是几乎同时到达微波炉前，结果是只有最后一个使用微波炉的人所定时长决定了整个微波炉的使用时长；现在要实现这样的功能：这三个人所需时间分别是1、3、5分钟，执行1分钟之后第一个人的任务结束，再执行2分钟第二个人的任务结束，再执行2分钟第三个人的任务结束，以上描述的场景就是使用单一计时器，构造一组函数，实现任意数量的计时器
+
+```c
+// main.c
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <wait.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include "anytimer.h"
+
+static void f1(void *s)
+{
+    printf("f1():%s", (char *)s);
+    fflush(NULL);
+}
+
+static void f2(void *s)
+{
+    printf("f2():%s", (char *)s);
+    fflush(NULL);
+}
+
+int main(void)
+{
+
+    at_addjob(4, f1, "hello");
+    at_addjob(2, f2, "world");
+    at_addjob(7, f3, "apue");
+
+    while (1)
+    {
+        write(1, "*", 1);
+        sleep(1);
+    }
+
+    anytimer_destroy();
+
+    return 0;
+}
+```
+
+* 26：4秒后调用函数f1，并且给函数传参一个字符串，26-28两行代码同理，执行效果为从程序执行开始计时，2s后打印world，再过去2s后打印hello，再过去3秒后打印apue
+* 30-34：在时间流逝期间每秒往终端打印一个星号，及最后显示在终端上的内容应该是`**world**hello***apue*******`
+
+每一句话都可以看做是一个任务job，每个job都有这几个属性：时间sec、执行操作函数func、函数传参arg
+
+* 第一个任务：sec=4，func=f1，arg=hello
+
+* 第二个任务：sec=2，func=f2，arg=world
+
+* 第三个任务：sec=7，func=f1，arg=apue
+
+之前函数的效果可以被理解成：计时开始时每秒对应每个job的sec属性字段都自减1，下一秒再自减1，当sec值为0的时候就去调用函数传递参数，所以这么一看的话其实和之前令牌桶的实现思路是类似的，一个是自减sec，一个是自减token
+
+<img src="index3.assets/image-20220325140437402.png" alt="image-20220325140437402" style="zoom:80%;" />
+
+```c
+// anytimer.h
+
+#ifndef _ANYTIMER_H_
+#define _ANYTIMER_H_
+
+#define JOB_MAX 1024
+
+typedef void at_jobfunc_t(void *);
+
+/**
+ * return >= 0          成功，返回任务ID
+ *        == -EINVAL    失败，参数非法
+ *        == -ENOSPC    失败，数组已满
+ *        == -ENOMEM    失败，分配内存空间异常
+ */
+int at_addjob(int sec, at_jonfunc_t *jobp, void *argv);
+
+
+
+/**
+ * 取消任务
+ * return == 0          成功，指定任务成功取消
+ *        == -EINVAL    失败，参数非法
+ *        == -EBUSY    	失败，指定任务已完成
+ *        == -ECANCELED 失败，指定任务重复取消
+ */
+int at_canceljob(int id);
+
+
+
+/**
+ * 因为任务无法自己释放资源，所以需要主动去回收，也即收尸操作
+ * return == 0          成功，指定任务成功释放
+ *        == -EINVAL    失败，参数非法
+ */
+int at_waitjob(int);
+
+#endif
+```
+
+* 16：之用令牌桶实现打印文字的实例中我们使用了结构体指针，通过返回指针的形式以供用户操作这个结构体里的属性，但是这里我们采取另一个方式，即参照文件描述符的实现思路返回给用户一个整型数，这个整型数就代表了这个结构体
+* 24：当一个任务结束的时候，肯定不能让其自行消亡，因为如果一个任务可以自行消亡，也即自身执行完毕后就释放资源的话，那么之前讲到的wait操作对子进程进行收尸就没有意义了，因为反正子进程能自行消亡，wait操作是一个典型的把异步操作同步化的操作。那么我们如何保证让这个已经被执行的任务在下一次扫描数组的时候被忽略？那就要求借助一个flag属性，当job被注册的时候可以吧flag值设为running，当任务被执行完成的时候就把flag设置为over，也即flag为正常模式的时候时间sec才会自检减，否则不自减
+
+<img src="index3.assets/image-20220325141307234.png" alt="image-20220325141307234" style="zoom:80%;" />
+
+对应的main函数实现骨架
+
+```c
+// main.c
+
+int main(void)
+{
+    int job1, job2, job3;
+
+    job1 = at_addjob(4, f1, "hello");
+    if(job1 < 0)
+    {
+        fprintf(stderr, "at_addjob():%s\n", stderror(-job1));
+        exit(1);
+    }
+    job2 = at_addjob(2, f2, "world");
+    if(job2 < 0)
+    {
+        fprintf(stderr, "at_addjob():%s\n", stderror(-job2));
+        exit(1);
+    }
+    job3 = at_addjob(7, f3, "apue");
+    if(job3 < 0)
+    {
+        fprintf(stderr, "at_addjob():%s\n", stderror(-job3));
+        exit(1);
+    }
+
+    while (1)
+    {
+        write(1, "*", 1);
+        sleep(1);
+    }
+
+    anytimer_destroy();
+
+    return 0;
+}
+```
+
 
 
 

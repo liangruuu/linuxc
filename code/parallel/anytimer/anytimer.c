@@ -13,6 +13,7 @@ static int inited = 0;
 static struct sigaction older;
 static struct itimerval olditv;
 
+
 struct timer
 {
     int sec;
@@ -31,7 +32,7 @@ static int anytimer_print(void)
         {
             // 发送中断信号
             ret = kill(getpid(), SIGALRM);
-            if (ret < 0)
+            if(ret < 0)
                 perror("kill()");
             return i;
         }
@@ -52,7 +53,7 @@ static void alarm_handler()
 
     pid = fork();
 
-    // child pid
+    //child pid
     if (pid == 0)
     {
         ret = anytimer_print();
@@ -95,7 +96,7 @@ void moduler_load()
 
     setitimer(ITIMER_REAL, &itv, &olditv);
     //钩子函数
-    atexit(moduler_unload);
+    atexit(moduler_unload); 
 }
 
 static int find_arr() // 寻找空数组下标
