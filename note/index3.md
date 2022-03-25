@@ -2357,6 +2357,162 @@ int main()
 ```
 
 * 22，29：阻塞并且保存之前的状态，然后恢复之前的状态
+* 18，31：之前经常强调的一点是，要培养宏观编程意识，不要以为只是在写main函数，而是要认为是在写一个大工程中的一个小模块，必须要确保进入这个程序，走出这个程序之后全局的状态是不能改变的，即一定要做保存和恢复的工作
+
+
+
+# 信号-sigsuspend
+
+>NAME
+>
+>> sigsuspend, rt_sigsuspend - wait for a signal
+>
+>SYNOPSIS
+>
+>> #include <signal.h>
+>>
+>> int sigsuspend(const sigset_t *mask);
+>
+>1. int sigsuspend(const sigset_t *mask)：跟pause函数一样都是等待一个信号来打断它
+>
+>
+>
+
+* 实现一个信号驱动程序：执行一段时间的时候会停住并且等待信号，只有发送了信号之后才会驱动程序继续执行，以打印星号代码为例
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+
+static void int_handler(int s)
+{
+    write(1, "!", 1);
+}
+
+int main()
+{
+    sigset_t set, oset, saveset;
+
+    signal(SIGINT, int_handler);
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigprocmask(SIG_UNBLOCK, &set, &saveset);
+
+    for (int j = 0; j < 1000; j++)
+    {
+        sigprocmask(SIG_BLOCK, &set, &oset);
+        for (int i = 0; i < 5; i++)
+        {
+            write(1, "*", 1);
+            sleep(1);
+        }
+        write(1, "\n", 1);
+        sigprocmask(SIG_SETMASK, &oset, NULL);
+        pause();
+        
+    }
+    sigprocmask(SIG_SETMASK, &saveset, NULL);
+
+    exit(0);
+}
+
+```
+
+* 29：先使用pause函数实现打印完一行星号之后等待信号被接收
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./susp 
+
+# result
+*****
+
+
+
+# result2(输入ctrl+c)
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./susp 
+*****
+^C!*****
+
+
+
+# result3(输入多次ctrl+c)
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./susp 
+*****
+^C!****^C*
+!
+
+```
+
+可以看到当连续输入多个ctrl+c的情况下，并没有达到我们想要的结果，即把ctrl+c作为驱动信号，输入了ctrl+c但是并没有驱动程序再执行一次
+
+由于被sigprocmask函数阻塞住了，所以进程无法看到信号，当打印完一行星号之后再通过sigprocmask解除阻塞，如果在sigprocmask接触阻塞之后再到pauase函数之前的一小段时间里信号就被响应的话pause函数就无法起到响应信号的作用，其实就相当于这个操作是非原子化的
+
+我们希望是在使用sigprocmask函数解除阻塞状态之后立刻信号被pause所接受，但是现在由于操作非原子化，导致有可能无法被pause函数接收了，所以如果要使用pause函数来实现信号驱动程序是不可能的，这个时候就需要使用sigsuspend函数来实现原子化操作
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+#include <unistd.h>
+#include <unistd.h>
+
+static void int_handler(int s)
+{
+    write(1, "!", 1);
+}
+
+int main()
+{
+    sigset_t set, oset, saveset;
+
+    signal(SIGINT, int_handler);
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigprocmask(SIG_UNBLOCK, &set, &saveset);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
+    for (int j = 0; j < 1000; j++)
+    {
+
+        for (int i = 0; i < 5; i++)
+        {
+            write(1, "*", 1);
+            sleep(1);
+        }
+        write(1, "\n", 1);
+
+        // sigset_t tmpset;
+        // sigprocmask(SIG_SETMASK, &oset, &tmpset);
+        // pause();
+        // sigprocmask(SIG_SETMASK, &tmpset, NULL);
+        sigsuspend(&oset);
+    }
+    sigprocmask(SIG_SETMASK, &saveset, NULL);
+
+    exit(0);
+}
+
+```
+
+* 21，33-37：定义局部变量tmpset，即在对oldset恢复的时候把之前的状态保存到tmpset变量中，其实tmpset跟set是一样的，首先调用21行的sigprocmask函数对于所有集合set中的信号进行阻塞，同时保存旧的状态oldset，然后在34行进行oldset的恢复，同时保存tmpset。执行pause函数之后对tmpset进行设置
+* 37：sigsuspend函数其实就相当于被注释的函数的原子操作
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./susp 
+
+# result
+*****
+^C!*****
+^C!**^C*^C**
+!*****
+```
+
+执行多次ctrl+c后在下一行不会阻塞住，而是会驱动程序执行一次
+
+
 
 
 
