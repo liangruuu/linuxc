@@ -151,17 +151,211 @@ int main()
 
 ```
 
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./create1 
+
+# result
+Begin!
+End!
+```
+
+按道理创建出来的兄弟线程会打印“Thread is working...”这句话，但是结果并没有。因为线程的调度取决于调度器的调度策略，当前main线程打印begin，然后创建一个线程，然后打印end，即被创建的线程还没来得及被调度执行打印函数的时候main线程就执行了exit(0)了，exit就是进程正常终止的方式之一
+
+# 线程-线程终止和栈清理
+
+线程的终止包括三种方式：
+
+1. 线程从启动例程返回，返回值为线程的退出码
+2. 线程可以被统一进程中的其他线程取消
+3. 线程调用pthread_exit()函数，相当于进程阶段的exit函数
+
+统一进程中的最后一个线程结束运行后，这个进程也会结束运行
+
+>NAME
+>
+>> pthread_exit - terminate calling thread
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> void pthread_exit(void *retval);
+>>
+>> Compile and link with -pthread.
+>
+>1. void pthread_exit(void *retval)
+
+在刚才的create1.c函数中使用`return NULL`来表示线程的退出，那么现在使用`pthread_exit(NULL)`来替换，当前看好像没有什么区别，但是之后要进行一些进程栈的清理，如果使用return null就相当于不能主动做线程栈的清理了
+
+```c
+static void *func(void *p)
+{
+    puts("Thread is working...");
+    pthread_exit(NULL);
+}
+```
+
+既然线程线程会被终止，那么就会有一个函数来进行线程终的收尸
+
+>NAME
+>
+>> pthread_join - join with a terminated thread
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_join(pthread_t thread, void **retval);
+>>
+>> Compile and link with -pthread. 
+>
+>1. int pthread_join(pthread_t thread, void **retval)：第一个参数指的是要被收尸的线程；第二个参数如果为NULL的话就表示只收尸不关心状态，如果要把收尸的状态加以查看的话就传一个void\*类型变量的地址，可以发现这个参数跟pthread_exit函数的参数是一样的变量名，所以这个pthread_join函数的retval变量就是pthread_exit函数的参数
+
+1. 这个函数相当于进程中的wait函数，但是跟wait函数不一样的是，wait函数不需要指定进程，而pthread_join需要指定所要回收的线程
+
+使用这两个函数来重构之前的代码
+
+```c
+// create.c
 
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <string.h>
 
+static void *func(void *p)
+{
+    puts("Thread is working...");
+    pthread_exit(NULL);
+}
 
+int main()
+{
+    pthread_t tid;
+    int err;
 
+    puts("Begin!");
 
+    err =  pthread_create(&tid, NULL, func, NULL);
+    if(err)
+    {
+        fprintf(stderr, "pthread_create():%s\n", strerror(err));
+        exit(1);
+    }
 
+    pthread_join(tid, NULL);
 
+    puts("End!");
 
+    exit(0);
+}
 
+```
 
+* 29：回收被创建的线程tid，第二个参数为空，因为pthread_exit的参数为空，pthread_join相当于在等待pthread_exit函数的返回值
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./create
+
+# result
+Begin!
+Thread is working...
+End!
+```
+
+先打印Begin!，然后调用pthread_join函数等待创建的线程执行完成，因为线程的中pthread_exit函数的返回值为NULL，即没有返回值，所以这里的第二个参数设置为NULL
+
+栈清理有两个函数需要掌握：
+
+1. pthread_cleanup_push();
+2. pthread_cleanup_pop();
+
+这两个函数相当于钩子函数，pthread_cleanup_push相当于往钩子上挂函数，pthread_cleanup_pop相当于从钩子上取函数
+
+>NAME
+>
+>> pthread_cleanup_push, pthread_cleanup_pop - push and pop thread cancellation clean-up handlers
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> void pthread_cleanup_push(void (\*routine)(void \*), void \*arg);
+>> void pthread_cleanup_pop(int execute);
+>>
+>> Compile and link with -pthread.
+>
+>1. void pthread_cleanup_push(void (\*routine)(void \*), void \*arg)：第一个参数为函数指针；第二个参数为函数指针对应函数传入的参数
+>2. void pthread_cleanup_pop(int execute)：参数execute指的是在拿到钩子函数的时候决定钩子函数是否被调用，如果为真则调用，如果为佳假则不被调用
+
+```c
+// cleanup.c 
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <string.h>
+
+static void cleanup_func(void *p)
+{
+    puts(p);
+}
+
+static void *func(void *p)
+{
+    puts("Thread is working...");
+    pthread_cleanup_push(cleanup_func, "cleanup:1");
+    pthread_cleanup_push(cleanup_func, "cleanup:2");
+    pthread_cleanup_push(cleanup_func, "cleanup:3");
+
+    pthread_cleanup_pop(1);
+    pthread_cleanup_pop(1);
+    // 不调用
+    pthread_cleanup_pop(0);
+
+    puts("push over!");
+
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    pthread_t tid;
+    int err;
+
+    puts("Begin!");
+
+    err = pthread_create(&tid, NULL, func, NULL);
+    if (err)
+    {
+        fprintf(stderr, "pthread_create():%s\n", strerror(err));
+        exit(1);
+    }
+
+    pthread_join(tid, NULL);
+
+    puts("End!");
+
+    exit(0);
+}
+
+```
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./clearup
+
+# result
+Begin!
+Thread is working...
+cleanup:3
+cleanup:2
+push over!
+End!
+```
+
+* 16-18：挂载钩子函数
+* 20-23：把钩子函数从栈中弹出，传参为1表示执行弹出的钩子函数，传参为0表示不执行弹出的钩子函数，所以可以看到cleanup:1语句没有被输出，而且执行顺序是按照挂载的顺序逆序执行
 
 
 
