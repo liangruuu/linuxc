@@ -2512,6 +2512,566 @@ liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/signal$ ./susp
 
 执行多次ctrl+c后在下一行不会阻塞住，而是会驱动程序执行一次
 
+# 信号-sigaction
+
+sigaction函数非常重要，它使用来替换signal函数的，signal函数其实是有使用上的缺陷的，以之前写的mydaemon2程序为例
+
+```c
+// mydeamon2.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <syslog.h>
+#include <errno.h>
+
+#define FNAME "/tmp/out"
+
+static int daemonize(void)
+{
+    int fd;
+    pid_t pid;
+    pid = fork();
+    if (pid < 0)
+    {
+        exit(1);
+    }
+    if (pid > 0)
+        exit(0);
+
+    fd = open("/dev/null", O_RDWR);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    // 标准流重定向到“黑洞”，即在终端不显示
+    dup2(fd, 0);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    if (fd > 2)
+        close(fd);
+
+    setsid();
+    chdir("/");
+    // umask(0);
+
+    return 0;
+}
+
+int main()
+{
+    FILE *fp;
+
+    openlog("mydaemon", LOG_PID, LOG_DAEMON);
+
+    if (daemonize())
+    {
+        syslog(LOG_ERR, "daemonize() failed!");
+    }
+    else
+    {
+        syslog(LOG_INFO, "daemonize() successded!");
+    }
+
+    fp = fopen(FNAME, "w");
+    if (fp == NULL)
+    {
+        syslog(LOG_ERR, "fopen():%s", strerror(errno));
+        exit(1);
+    }
+
+    syslog(LOG_INFO, "%s was opened.", FNAME);
+
+    for (int i = 0;; i++)
+    {
+        fprintf(fp, "%d\n", i);
+        fflush(fp);
+        syslog(LOG_DEBUG, "%d is printed.", i);
+        sleep(1);
+    }
+
+    fclose(fp);
+    closelog();
+
+    exit(0);
+}
+```
+
+* 78-79：这两行代码是肯定无法被执行的，因为守护进程一定是异常终止的，守护进程脱离控制终端，我们需要用kill 进程号来把它杀掉，所以该进程无法正常释放资源，其实讲到信号章节，这个代码就可以被重构了
+
+```c
+// mydeamon2.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <syslog.h>
+#include <errno.h>
+
+#define FNAME "/tmp/out"
+
+
+static void daemon_exit(int s)
+{
+    //if(s == SIGINT){}
+    //else if(s == SIGTERM){}...
+    
+    fclose(fp);
+    closelog();
+}
+
+static int daemonize(void)
+{
+    int fd;
+    pid_t pid;
+    pid = fork();
+    if (pid < 0)
+    {
+        exit(1);
+    }
+    if (pid > 0)
+        exit(0);
+
+    fd = open("/dev/null", O_RDWR);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    // 标准流重定向到“黑洞”，即在终端不显示
+    dup2(fd, 0);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    if (fd > 2)
+        close(fd);
+
+    setsid();
+    chdir("/");
+    // umask(0);
+
+    return 0;
+}
+
+int main()
+{
+    FILE *fp;
+    
+    signal(SIGINT, deamon_exit);
+    signal(SIGQUIT, deamon_exit);
+    signal(SIGTERM, deamon_exit);
+
+    openlog("mydaemon", LOG_PID, LOG_DAEMON);
+
+    if (daemonize())
+    {
+        syslog(LOG_ERR, "daemonize() failed!");
+    }
+    else
+    {
+        syslog(LOG_INFO, "daemonize() successded!");
+    }
+
+    fp = fopen(FNAME, "w");
+    if (fp == NULL)
+    {
+        syslog(LOG_ERR, "fopen():%s", strerror(errno));
+        exit(1);
+    }
+
+    syslog(LOG_INFO, "%s was opened.", FNAME);
+
+    for (int i = 0;; i++)
+    {
+        fprintf(fp, "%d\n", i);
+        fflush(fp);
+        syslog(LOG_DEBUG, "%d is printed.", i);
+        sleep(1);
+    }
+
+    fclose(fp);
+    closelog();
+
+    exit(0);
+}
+```
+
+* 16-23：daemon_exit函数做的就是我们之前说的无法被执行到的两个方法，参数s是一个代表信号的整型，代表收到所有指定的信号都会执行同一个操作，如果想要区分收到信号时的操作的话就可以用if-else语句来分别指定信号处理函数
+
+* 57-59：使用signal函数执行当收到对应的信号时执行daemon_exit函数，但实际上添加上这三行代码后有被重入的风险，本质就是信号操作的非原子化，这三个函数中指定的信号不管谁先到都会去执行daemon_exit函数中的fclose，但是当一个信号正在调用daemon_exit函数中的fclose操作还没执行完的时候，另一个信号到来也同样的进入daemon_exit函数执行fclose操作，则文件fp就会被多个信号同时调用，也就是说一个文件空间被释放了两次，这就会导致内存泄漏的问题
+
+    所以这就是signal函数的设计缺陷，当多个信号在调用同一个信号处理函数的时候，希望在响应某一个信号期间把其他信号阻塞住，其实就是类似互斥的操作，如果自己去实现的话就需要代用sigprocmask函数，这是非常麻烦的，所以sigaction函数就是来解决这样的问题的
+
+>NAME
+>
+>> sigaction, rt_sigaction - examine and change a signal action
+>
+>SYNOPSIS
+>
+>> #include <signal.h>
+>>
+>> int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
+>
+>1. int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)：对信号signum定义新的行为act，并且保存信号signum旧的行为，如果不需要保存就写空指针，返回值以0和-1进行区分是否成功
+>
+>
+
+1. const struct sigaction *act：
+
+>DESCRIPTION
+>
+>> The sigaction structure is defined as something like:
+>>
+>> ```c
+>> struct sigaction {
+>>     void     (*sa_handler)(int);
+>>     void     (*sa_sigaction)(int, siginfo_t *, void *);
+>>     sigset_t   sa_mask;
+>>     int        sa_flags;
+>>     void     (*sa_restorer)(void);
+>> };
+>> ```
+>>
+>> * On some architectures a union is involved: do not assign to both sa_handler and sa_sigaction，在很多环境上定义sigaction函数的时候不能同时指定sa_handler和sa_sigaction属性
+>> * sa_mask：信号集类型数据，即响应当前信号的同时把其他指定在信号集中的信号阻塞住
+>
+>
+
+把之前代码中的三行signal函数替换成sigaction
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <syslog.h>
+#include <errno.h>
+#include <signal.h>
+
+#define FNAME "/tmp/out"
+
+static FILE *fp;
+
+static void daemon_exit(int s)
+{
+    fclose(fp);
+    closelog();
+}
+
+static int daemonize(void)
+{
+    int fd;
+    pid_t pid;
+    pid = fork();
+    if (pid < 0)
+    {
+        exit(1);
+    }
+    if (pid > 0)
+        exit(0);
+
+    fd = open("/dev/null", O_RDWR);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    // 标准流重定向到“黑洞”，即在终端不显示
+    dup2(fd, 0);
+    dup2(fd, 1);
+    dup2(fd, 2);
+    if (fd > 2)
+        close(fd);
+
+    setsid();
+    chdir("/");
+    // umask(0);
+
+    return 0;
+}
+
+int main()
+{
+    struct sigaction sa;
+
+    sa.sa_handler = daemon_exit;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGQUIT);
+    sigaddset(&sa.sa_mask, SIGTERM);
+    sigaddset(&sa.sa_mask, SIGINT);
+    // 没有特殊要求，所以flag字段设置为0
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    openlog("mydaemon", LOG_PID, LOG_DAEMON);
+
+    if (daemonize())
+    {
+        syslog(LOG_ERR, "daemonize() failed!");
+    }
+    else
+    {
+        syslog(LOG_INFO, "daemonize() successded!");
+    }
+
+    fp = fopen(FNAME, "w");
+    if (fp == NULL)
+    {
+        syslog(LOG_ERR, "fopen():%s", strerror(errno));
+        exit(1);
+    }
+
+    syslog(LOG_INFO, "%s was opened.", FNAME);
+
+    for (int i = 0;; i++)
+    {
+        fprintf(fp, "%d\n", i);
+        fflush(fp);
+        syslog(LOG_DEBUG, "%d is printed.", i);
+        sleep(1);
+    }
+
+    exit(0);
+}
+```
+
+* 使用sigaction函数重构mytbf项目
+
+mytbf工程的作用是实现流量控制算法，我们在另一个终端执行脚本语句`while true; do kill -ALRM mytbf进程号; done`，也就是说在mytbf程序执行过程中，另一个用户在不断地使用kill命令杀死这个进程，结果就是这个对应所要打印输出的文件内容会被瞬间执行完成，即流控算法会失效，像这个问题，signal函数是没有办法结解决的，这个根源在于signal并没有管信号的来源、属性信息...它能做到的是只要来了一个信号，并且给信号注册了一个行为，那就去执行这个信号的行为。如果能区分信号的来源的话，那么就可以指定只响应从内核来的信号，因为在终端上利用ALRM命令来发信号，这是一个从用户态发送的信号；或者说只响应从指定PID来的信号，其他的信号不响应那么其他用户就无法干涉流控算法，所以就需要用到sigaction函数
+
+sigaction结构体中有一个三参的信号处理函数形式`void (*sa_sigaction)(int, siginfo_t *, void *)`，第一个参数是signum；第二个参数是一个siginfo_t类型的指针，记录的是当前收到信号的所有属性信息；第三个参数可以不用去管没啥用
+
+```c
+siginfo_t {
+    int      si_signo;     /* Signal number */
+    int      si_errno;     /* An errno value */
+    int      si_code;      /* Signal code */
+    int      si_trapno;    /* Trap number that caused
+                                         hardware-generated signal
+                                         (unused on most architectures) */
+    pid_t    si_pid;       /* Sending process ID */
+    uid_t    si_uid;       /* Real user ID of sending process */
+    int      si_status;    /* Exit value or signal */
+    ...
+}
+```
+
+其中si_code值比较重要且常用，记录当前信号的来源
+
+```markdown
+# 从用户来的
+SI_USER
+	kill(2).
+
+# 从内核来的
+SI_KERNEL
+	Sent by the kernel.
+
+# 从信号队列来的
+SI_QUEUE
+	sigqueue(3).
+......
+```
+
+* 只需要改变mytbf.c文件中的内容即可
+
+```c
+// mytbf.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/time.h>
+
+#include "mytbf.h"
+
+static struct mytbf_st* job[MYTBF_MAX];
+
+static int inited = 0;
+
+static struct sigaction alarm_sa_save;
+
+struct mytbf_st
+{
+    int cps;
+    int burst;
+    int token;
+    int pos;
+};
+
+static void alarm_action(int s, siginfo_t *infop, void *unused)
+{
+    if(infop->si_code != SI_KERNEL)
+        return ;
+    
+    for (int i = 0; i < MYTBF_MAX; i++)
+    {
+        if(job[i] != NULL)
+        {
+            job[i]->token += job[i]->cps;
+            if(job[i]->token > job[i]->burst)
+                job[i]->token = job[i]->burst;
+        }
+    }
+    
+}
+
+static void module_unload(void)
+{
+    struct itimerval itv;
+    
+    sigaction(SIGALRM, &alarm_sa_save, NULL);
+
+    itv.it_interval.tv_sec = 0;
+    itv.it_interval.tv_usec = 0;
+    itv.it_value.tv_sec = 0;
+    itv.it_value.tv_usec = 0;
+    setitimer(ITIMER_REAL, &itv, NULL);
+
+    for (int i = 0; i < MYTBF_MAX; i++)
+        free(job[i]);
+}
+
+static void module_load(void)
+{
+    struct sigaction sa;
+    struct itimerval itv;
+
+    sa.sa_sigaction = alarm_action;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+
+    sigaction(SIGALRM, &sa, &alarm_sa_save);
+
+    itv.it_interval.tv_sec = 1;
+    itv.it_interval.tv_usec = 0;
+    itv.it_value.tv_sec = 1;
+    itv.it_value.tv_usec = 0;
+    setitimer(ITIMER_REAL, &itv, NULL);
+
+    // 钩子函数，程序结束前最后执行
+    atexit(module_unload);
+}
+
+static int min(int a, int b)
+{
+    if(a < b)
+        return a;
+    return b;
+}
+
+static int get_free_pos(void)
+{
+    for(int i = 0; i < MYTBF_MAX; i++)
+    {
+        if(job[i] == NULL)
+            return i;
+    }
+
+    return -1;
+}
+
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+    if(!inited)
+    {
+        module_load();
+        inited = 1;
+    }
+
+
+
+    int pos = get_free_pos();
+    if(pos < 0)
+        return NULL;
+
+    me = malloc(sizeof(*me));
+    if(me == NULL)
+        return NULL;
+    
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+    me->pos = pos;
+    job[pos] = me;
+
+    return me;
+}
+
+int mytbf_fetchtoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+    int n;
+    
+    if(size <= 0)
+        return -EINVAL;
+
+    while(me->token <= 0)
+        pause();
+
+    n = min(me->token, size);
+    me->token -= n; 
+
+    return n;
+}
+
+int mytbf_returntoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+
+    if(size <= 0)
+        return -EINVAL;
+
+    me->token += size;
+    if(me->token > me->burst)
+        me->token = me->burst;
+
+    return size;
+}
+
+int mytbf_destroy(mytbf_t *ptr)
+{
+    
+    struct mytbf_st *me = ptr;
+    job[me->pos] = NULL;
+    free(ptr);
+}
+```
+
+* 28-29：如果信号不来自内核就一概不响应
+* 16：因为需要在unload函数中对信号之前的行为做恢复，在load函数中对信号之前的行为做保存，两种共用同一个变量，所以定义一个全局变量以供两个函数使用
+* 68：把信号之前的状态保存到alarm_sa_save中，给信号注册的行为需要放在一个结构体sa中
+* 64：应该使用sa_sigaction，因为sa_handle信号处理函数是不能保存信号来源的，信号属性是在siginfo_t结构体中存放的，而siginfo_t只被用在了sa_sigaction结构体中
+* 66：sa_flags设置为SA_SIFINFO的话就表示用的是sa_sigaction而不是sa_handle
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
