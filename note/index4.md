@@ -1129,5 +1129,450 @@ liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ .
 [1] 30000193 is a primer
 ```
 
+# 线程-线程令牌桶
+
+* 用线程知识和互斥量改写之前的用信号实现的令牌通
+
+信号处理函数alarm_handle是每秒调用一次，给当前非空的job添加token，如果使用多线程去实现的话，则可以把当前函数独立成一个线程在旁边运行，线程每秒钟执行一次
+
+在当前一定会有一些资源是作为独占资源存在的，比如说全局变量job数组，同一时刻有用户在init，有用户在destory，有用户在fetch_token...如果同一时刻有多个用户在调用get_free_pos函数来寻找空位置的话就极有可能发生竞争，说白了就是程序中出现了job的位置都应该先加锁后解锁
+
+```c
+static pthread_mutex_t mut_job = PTHREAD_MUTEX_INITIALIZER;
+```
+
+互斥量mut_jpb一旦被定义就应该去思考在代码的哪里去写销毁这个互斥量的逻辑，肯定是不能在destory函数中去销毁的，因为destory函数中销毁的是一个令牌桶，而job数组是相当于一个全局变量的角色，因此这个互斥量一定是在模块卸载的时候，即在module_unload函数中被销毁
+
+```c
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+
+    if(!inited)
+    {
+        module_load();
+        inited = 1;
+    }
+
+    me = malloc(sizeof(*me));
+    if (me == NULL)
+        return NULL;
+
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+
+    pthread_mutex_lock(&mut_job);
+    int pos = get_free_pos_unlocked();
+    if (pos < 0)
+    {
+        pthread_mutex_unlock(&mut_job);
+        free(me);
+        return NULL;
+    }
+
+    me->pos = pos;
+    job[pos] = me;
+    pthread_mutex_unlock(&mut_job);
+
+    return me;
+}
+
+static int get_free_pos_unlocked(void)
+{
+    for (int i = 0; i < MYTBF_MAX; i++)
+    {
+        if (job[i] == NULL)
+            return i;
+    }
+
+    return -1;
+}
+```
+
+* 19、30：因为要执行get_free_pos函数，也就是对全局变量job数组进行操作，所以需要在其两端进行锁操作，两个锁操作之间的内容就是临界区
+* 11-17：malloc函数因为其对job数组是没什么关系的，所以需要把它从临界区中提出去，放在临界区之前
+* 23：因为我们之前说了如果在临界区内有跳转语句，而这个跳转语句会跳转到临界区之外的话，就必须加上解锁操作
+* 20、35-44：这行代码其实也是临界区中的跳转语句，因为函数其实就是一个跳转语句，但这里因为用于对pos变量加锁的lock操作同时也把这个函数给上锁了，所以单就这里的情况而言是没必要加锁的，但是为了体现出这个函数是没有加锁的，所以用`get_free_pos_unlocked`这个特殊的函数名来替换，用来提示用户如果使用这个函数的话先加锁后使用
+
+```c
+int mytbf_destroy(mytbf_t *ptr)
+{
+
+    struct mytbf_st *me = ptr;
+    pthread_mutex_lock(&mut_job);
+    job[me->pos] = NULL;
+    pthread_mutex_unlock(&mut_job);
+
+    free(ptr);
+    
+    return 0;
+}
+```
+
+```c
+int mytbf_fetchtoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+    int n;
+
+    if (size <= 0)
+        return -EINVAL;
+
+    pthread_mutex_lock(&me->mut);
+    while (me->token <= 0)
+    {
+        pthread_mutex_unlock(&me->mut);
+        sched_yield();
+        pthread_mutex_lock(&me->mut);
+    }
+
+    n = min(me->token, size);
+    me->token -= n;
+    pthread_mutex_unlock(&me->mut);
+
+    return n;
+}
+
+struct mytbf_st
+{
+    int cps;
+    int burst;
+    int token;
+    int pos;
+    pthread_mutex_t mut;
+};
+```
+
+* 9、19：token同样是全局的数据，所以理当使用锁操作，但是这里的操作又跟job没什么关系，所以不能使用mut_job锁，这时有个思路是像job一样设置一个全局的token锁，如果全局设置token的锁的话就相当于1024个桶共用一个token锁，但是token的竞争关系是在一个桶里发生的，不同的桶的token是互不干扰的，桶A里的token+1和桶B里的token-1是互不干涉的，可以形象地理解成一栋楼里的若干房间，如果设置一把全局的锁的话，意思就是楼里的所有房间共用一把锁，这肯定是不合理的，所以我们需要针对每一个桶的token设置互斥锁，即在桶的结构体中设置一个锁属性，也即30行的代码，此时我们还需要在init函数里添加对于锁属性mut的初始化`pthread_mutex_init(&me->mut, NULL);`，并且在destory函数中添加销毁token锁的代码`pthread_mutex_destroy(&me->mut);`
+
+<img src="index4.assets/image-20220327162204197.png" alt="image-20220327162204197" style="zoom:80%;" />
+
+* 10-19：原来的代码是使用pause函数来等待信号打断，这里使用线程的方式，之前讲过在循环体里设置锁操作的方式，这里沿用之前的代码格式，用sched_yield函数来防止释放锁后立刻加锁
+
+```c
+int mytbf_returntoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+
+    if (size <= 0)
+        return -EINVAL;
+
+    pthread_mutex_lock(&me->mut);
+    me->token += size;
+    if (me->token > me->burst)
+        me->token = me->burst;
+    pthread_mutex_unlock(&me->mut);
+
+    return size;
+}
+```
+
+* 8-12：因为对于共享变量token操作，所以需要进行锁操作
+
+```c
+static void module_load(void)
+{
+
+    int err;
+    err = pthread_create(&tid_alarm, NULL, thr_alarm, NULL);
+    if (err)
+    {
+        fprintf(stderr, "pthread_create():%s\n", strerror(err));
+        exit(1);
+    }
+
+    // 钩子函数，程序结束前最后执行
+    atexit(module_unload);
+}
+
+static pthread_t tid_alarm;
+
+static void *thr_alarm(void *p)
+{
+    while (1)
+    {
+        pthread_mutex_lock(&mut_job);
+        for (int i = 0; i < MYTBF_MAX; i++)
+        {
+            if (job[i] != NULL)
+            {
+                pthread_mutex_lock(&job[i]->mut);
+                job[i]->token += job[i]->cps;
+                if (job[i]->token > job[i]->burst)
+                    job[i]->token = job[i]->burst;
+                pthread_mutex_unlock(&job[i]->mut);
+            }
+        }
+        pthread_mutex_unlock(&mut_job);
+        sleep(1);
+    }
+}
+```
+
+* 5：创建一个线程，每秒钟执行一次，起到的是之前alarm函数的作用
+* 22、27：22行的锁是针对job数组的，27行的锁是针对token的
+
+```c
+static void module_unload(void)
+{
+
+    pthread_cancel(tid_alarm);
+    pthread_join(tid_alarm, NULL);
+
+    for (int i = 0; i < MYTBF_MAX; i++)
+    {
+        if (job[i] != NULL)
+        {
+            mytbf_destroy(job[i]);
+        }
+    }
+
+    pthread_mutex_destroy(&mut_job);
+}
+```
+
+在信号章节我们使用一个inited变量来控制单次模块的初始化，这里我们使用线程的内容来进行初始化，因为inited也是一个多线程共用变量，所以也涉及到重入问题，所以我们也需要对inited变量加锁
+
+```c
+lock
+if(!inited)
+{
+    module_load();
+    inited = 1;
+}
+unlock
+```
+
+这里补充一个函数pthread_once用来进行动态模块的单次初始化，其实就相当于我们刚才的锁操作逻辑
+
+```c
+static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+
+    pthread_once(&init_once, module_load);
+
+    me = malloc(sizeof(*me));
+    if (me == NULL)
+        return NULL;
+
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+    pthread_mutex_init(&me->mut, NULL);
+
+    pthread_mutex_lock(&mut_job);
+    int pos = get_free_pos_unlocked();
+    if (pos < 0)
+    {
+        pthread_mutex_unlock(&mut_job);
+        free(me);
+        return NULL;
+    }
+
+    me->pos = pos;
+    job[pos] = me;
+    pthread_mutex_unlock(&mut_job);
+
+    return me;
+}
+```
+
+完整代码如下：
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
+
+#include "mytbf.h"
+
+static struct mytbf_st *job[MYTBF_MAX];
+static pthread_mutex_t mut_job = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t tid_alarm;
+static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+
+struct mytbf_st
+{
+    int cps;
+    int burst;
+    int token;
+    int pos;
+    pthread_mutex_t mut;
+};
+
+static void *thr_alarm(void *p)
+{
+    while (1)
+    {
+        pthread_mutex_lock(&mut_job);
+        for (int i = 0; i < MYTBF_MAX; i++)
+        {
+            if (job[i] != NULL)
+            {
+                pthread_mutex_lock(&job[i]->mut);
+                job[i]->token += job[i]->cps;
+                if (job[i]->token > job[i]->burst)
+                    job[i]->token = job[i]->burst;
+                pthread_mutex_unlock(&job[i]->mut);
+            }
+        }
+        pthread_mutex_unlock(&mut_job);
+        sleep(1);
+    }
+}
+
+static void module_unload(void)
+{
+
+    pthread_cancel(tid_alarm);
+    pthread_join(tid_alarm, NULL);
+
+    for (int i = 0; i < MYTBF_MAX; i++)
+    {
+        if (job[i] != NULL)
+        {
+            mytbf_destroy(job[i]);
+        }
+    }
+
+    pthread_mutex_destroy(&mut_job);
+}
+
+static void module_load(void)
+{
+
+    int err;
+    err = pthread_create(&tid_alarm, NULL, thr_alarm, NULL);
+    if (err)
+    {
+        fprintf(stderr, "pthread_create():%s\n", strerror(err));
+        exit(1);
+    }
+
+    // 钩子函数，程序结束前最后执行
+    atexit(module_unload);
+}
+
+static int min(int a, int b)
+{
+    if (a < b)
+        return a;
+    return b;
+}
+
+static int get_free_pos_unlocked(void)
+{
+    for (int i = 0; i < MYTBF_MAX; i++)
+    {
+        if (job[i] == NULL)
+            return i;
+    }
+
+    return -1;
+}
+
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+
+    pthread_once(&init_once, module_load);
+
+    me = malloc(sizeof(*me));
+    if (me == NULL)
+        return NULL;
+
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+    pthread_mutex_init(&me->mut, NULL);
+
+    pthread_mutex_lock(&mut_job);
+    int pos = get_free_pos_unlocked();
+    if (pos < 0)
+    {
+        pthread_mutex_unlock(&mut_job);
+        free(me);
+        return NULL;
+    }
+
+    me->pos = pos;
+    job[pos] = me;
+    pthread_mutex_unlock(&mut_job);
+
+    return me;
+}
+
+int mytbf_fetchtoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+    int n;
+
+    if (size <= 0)
+        return -EINVAL;
+
+    pthread_mutex_lock(&me->mut);
+    while (me->token <= 0)
+    {
+        pthread_mutex_unlock(&me->mut);
+        sched_yield();
+        pthread_mutex_lock(&me->mut);
+    }
+
+    n = min(me->token, size);
+    me->token -= n;
+    pthread_mutex_unlock(&me->mut);
+
+    return n;
+}
+
+int mytbf_returntoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+
+    if (size <= 0)
+        return -EINVAL;
+
+    pthread_mutex_lock(&me->mut);
+    me->token += size;
+    if (me->token > me->burst)
+        me->token = me->burst;
+    pthread_mutex_unlock(&me->mut);
+
+    return size;
+}
+
+int mytbf_destroy(mytbf_t *ptr)
+{
+
+    struct mytbf_st *me = ptr;
+    pthread_mutex_lock(&mut_job);
+    job[me->pos] = NULL;
+    pthread_mutex_unlock(&mut_job);
+
+    pthread_mutex_destroy(&me->mut);
+    free(ptr);
+}
+```
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix/mytbf_mt$ ./mytbf /etc/services 
+
+# result
+# Network services, Internet style
+#
+# Note that it is presently the policy of IANA to assign a single well-kn
+```
+
+
+
+
+
 
 
