@@ -1570,6 +1570,28 @@ liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix/my
 # Note that it is presently the policy of IANA to assign a single well-kn
 ```
 
+# 线程-条件变量
+
+因为下面的代码，上面实现令牌桶的方法结果会出现盲等的状态，(加锁-查看-解锁-等待)在一秒钟执行了无数次，这还是典型的查询法，即不间断地查看token的值，如果要把它改成通知法的话就变成了当处理函数增加或减少token之后告诉当前线程，就像过马路一样，行人先等待，如果能过马路的话红绿灯会通知行人做出行同行操作，会发出通知或者信号来吧当前线程唤醒
+
+```c
+pthread_mutex_lock(&me->mut);
+while (me->token <= 0)
+{
+    pthread_mutex_unlock(&me->mut);
+    sched_yield();
+    pthread_mutex_lock(&me->mut);
+}
+
+n = min(me->token, size);
+me->token -= n;
+pthread_mutex_unlock(&me->mut);
+```
+
+查询法多半会处于盲等状态，不停地主动去查看变量状态，条件变量可以把其变为通知形式，条件变量中涉及到一个类型：pthread_cond_t，常规操作包括init和destory，具体用法涉及到`pthread_cond_broadcast`或者是`pthread_cond_signal`去发送一个消息
+
+
+
 
 
 
