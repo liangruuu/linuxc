@@ -406,11 +406,238 @@ close(fd2);
 
 取消由取消选项来做主，取消有两种状态：允许、不允许，如果设置为允许取消的话，又分为异步取消和推迟取消，其中推迟取消是默认的设置，推迟指的是推迟到cancel点来进行响应。cancel点：posix定义的cancel点都是可能引发阻塞的系统调用，而非系统调用的内容是否是cancel点在不同平台上可能不同，所以刚才举的例子`还没来得及挂载钩子函数的时候就被别人cancel了`的情况是不存在的，即可以在挂载函数之前收到cancel信号，但是不会取消，因为cleanup_push不是cancel点，即cleanup_push不阻塞系统调用，所以会继续执行直到执行到下面的open函数，因为open是阻塞系统调用，所以cancel会在这个点去响应
 
+# 线程-线程竞争实例
+
+* 使用多线程实现筛选质数的功能
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <pthread.h>
+
+#define LEFT 30000000
+#define RIGHT 30000200
+#define THRNUM (RIGHT - LEFT + 1)
 
 
+static void *thr_prime(void *p)
+{
+    int i, j, mark;
+    i = *(int *)p;
+    mark = 1;
+    for (j = 2; j < i / 2; j++)
+    {
+        if (i % j == 0)
+        {
+            mark = 0;
+            break;
+        }
+    }
+    if (mark)
+        printf("%d is a primer\n", i);
 
+    pthread_exit(NULL);
+}
 
+int main()
+{
+    int i, err;
+    pthread_t tid[THRNUM];
 
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+
+        err = pthread_create(tid + (i - LEFT), NULL, thr_prime, &i);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+        pthread_join(tid[i - LEFT], NULL);
+
+    exit(0);
+}
+
+```
+
+* 11：使用201个线程执行操作
+* 33：main线程创建其兄弟线程去执行判断质数与否的功能
+* 49-50：创建了多少线程就需要调用多少次join操作进行线程资源的回收
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./primer_th 
+    
+# result
+30000059 is a primer
+30000059 is a primer
+30000163 is a primer
+30000163 is a primer
+30000079 is a primer
+30000037 is a primer
+30000133 is a primer
+30000163 is a primer
+30000037 is a primer
+```
+
+这个执行结果出现的原因是线程间的竞争关系，可以看这行代码`pthread_create(tid + (i - LEFT), NULL, thr_prime, &i);`，在创建所有线程的时候给每个线程传的参数都是i的地址，也就是说thr_prime函数同时在运行这201份，这201个指针p实际上都指向了变量i，即还没有确认创建出来的第一个线程把i拿走就在创建第二个线程了，所以说错误就错在用地址传参，i本身就一块地址，然后找了201个指针来指向这块空间，肯定会出现竞争的
+
+<img src="index4.assets/image-20220327100421468.png" alt="image-20220327100421468" style="zoom:80%;" />
+
+如果问题出在201个指针公用一块的地址的话，那就不传地址`pthread_create(tid + (i - LEFT), NULL, thr_prime, i);`，用传值来替换，但是因为pthread_create函数的第四个参数的类型需要是地址，所以使用一种丑陋的方式强制类型转换`pthread_create(tid + (i - LEFT), NULL, thr_prime, (void *)i);`
+
+```c
+static void *thr_prime(void *p)
+{
+    int i, j, mark;
+    i = (int)p;
+    mark = 1;
+    for (j = 2; j < i / 2; j++)
+    {
+        if (i % j == 0)
+        {
+            mark = 0;
+            break;
+        }
+    }
+    if (mark)
+        printf("%d is a primer\n", i);
+
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    int i, err;
+    pthread_t tid[THRNUM];
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        err = pthread_create(tid + (i - LEFT), NULL, thr_prime, (void *)i);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+        pthread_join(tid[i - LEFT], NULL);
+
+    exit(0);
+}
+
+```
+
+<img src="index4.assets/image-20220327101122374.png" alt="image-20220327101122374"  />
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./primer_th 
+
+# result
+30000083 is a primer
+30000059 is a primer
+30000037 is a primer
+30000049 is a primer
+30000079 is a primer
+30000041 is a primer
+30000109 is a primer
+30000001 is a primer
+30000137 is a primer
+30000133 is a primer
+30000071 is a primer
+30000199 is a primer
+30000193 is a primer
+30000023 is a primer
+30000163 is a primer
+30000167 is a primer
+30000169 is a primer
+30000149 is a primer
+```
+
+结果为什么会冲突，是因为201个指针指向了同一个i的地址，那其实如果201个指针指向的是201块空间不就好了，所以可以构造一个结构体
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <pthread.h>
+
+#define LEFT 30000000
+#define RIGHT 30000200
+#define THRNUM (RIGHT - LEFT + 1)
+
+struct thr_arg_st
+{
+    int n;
+};
+
+static void *thr_prime(void *p)
+{
+    int i, j, mark;
+    i = ((struct thr_arg_st *)p)->n;
+    // free(p);
+    mark = 1;
+    for (j = 2; j < i / 2; j++)
+    {
+        if (i % j == 0)
+        {
+            mark = 0;
+            break;
+        }
+    }
+    if (mark)
+        printf("%d is a primer\n", i);
+
+    pthread_exit(p);
+}
+
+int main()
+{
+    int i, err;
+    pthread_t tid[THRNUM];
+    struct thr_arg_st *p;
+    void *ptr;
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        p = malloc(sizeof(*p));
+        if (p == NULL)
+        {
+            perror("malloc()");
+            exit(1);
+        }
+        p->n = i;
+        err = pthread_create(tid + (i - LEFT), NULL, thr_prime, p);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        pthread_join(tid[i - LEFT], &ptr);
+        free(ptr);
+    }
+
+    exit(0);
+}
+
+```
+
+* 45：201个线程每一个都拿到一块独立的空间则需要考虑使用动态分配，而指针变量指向一个结构体(其实可以直接malloc一块int大小的空间，这里采用结构体是为了以后可能的功能拓展，两种方式均可)
+* 22，34，53，64，65：因为需要把malloc申请的内从空间释放掉，通过pthread_exit函数把处理过的变量p返回，并且通过pthread_join接收，从而做到释放空间
 
 
 
