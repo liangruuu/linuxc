@@ -357,6 +357,63 @@ End!
 * 16-18：挂载钩子函数
 * 20-23：把钩子函数从栈中弹出，传参为1表示执行弹出的钩子函数，传参为0表示不执行弹出的钩子函数，所以可以看到cleanup:1语句没有被输出，而且执行顺序是按照挂载的顺序逆序执行
 
+# 线程的取消
+
+一个线程在执行的过程中一定会用到线程的取消，多线程可以把任务分摊开，比如有一个深度为1W的二叉树，要在这颗二叉树中查找一个指定节点，从第三层开始用四个线程每个线程负责找一颗子树，则会有一个线程找到指定的那个节点，那么其他线程就没有必要继续找下去，则这个时候就需要把其他三个线程给取消了，如果是一个正在运行的线程是没有办法收尸的，所以就需要先取消再收尸
+
+>NAME
+>
+>> pthread_cancel - send a cancellation request to a thread
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_cancel(pthread_t thread);
+>>
+>> Compile and link with -pthread.
+>
+>1. int pthread_cancel(pthread_t thread)：给一个线程发送取消请求，参数就是指定线程
+
+1. 先使用pthread_cancel函数取消线程，再使用pthread_join进行线程资源的回收
+
+有以下代码：
+
+```c
+fd1 = open();
+if(fd1 < 0)
+{
+    perror();
+	exit(1);
+}
+//      -----------> cleanup_push -> close(fd1)
+
+fd2 = open();
+if(fd2 < 0)
+{
+    perror();
+	exit(1);
+}
+//      -----------> cleanup_push -> close(fd2)
+
+close(fd1);
+close(fd2);
+```
+
+这是一个线程，当前线程在执行打开两个文件的操作，当执行完打开第一个文件的时候收到了cancel线程的请求，则到此为止fd1还没来得即close，解决办法就是通过pthread_cleanup_push挂载一个钩子函数，这个钩子函数的作用就是执行close操作，钩子函数会在执行pthread_cleanup_pop的时候被调用
+
+但这是一种非常理想的情况，如果是在还没来得及挂载钩子函数的时候就被别人cancel了怎么办？
+
+取消由取消选项来做主，取消有两种状态：允许、不允许，如果设置为允许取消的话，又分为异步取消和推迟取消，其中推迟取消是默认的设置，推迟指的是推迟到cancel点来进行响应。cancel点：posix定义的cancel点都是可能引发阻塞的系统调用，而非系统调用的内容是否是cancel点在不同平台上可能不同，所以刚才举的例子`还没来得及挂载钩子函数的时候就被别人cancel了`的情况是不存在的，即可以在挂载函数之前收到cancel信号，但是不会取消，因为cleanup_push不是cancel点，即cleanup_push不阻塞系统调用，所以会继续执行直到执行到下面的open函数，因为open是阻塞系统调用，所以cancel会在这个点去响应
+
+
+
+
+
+
+
+
+
 
 
 
