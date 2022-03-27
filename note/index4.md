@@ -639,6 +639,336 @@ int main()
 * 45：201个线程每一个都拿到一块独立的空间则需要考虑使用动态分配，而指针变量指向一个结构体(其实可以直接malloc一块int大小的空间，这里采用结构体是为了以后可能的功能拓展，两种方式均可)
 * 22，34，53，64，65：因为需要把malloc申请的内从空间释放掉，通过pthread_exit函数把处理过的变量p返回，并且通过pthread_join接收，从而做到释放空间
 
+# 线程-竞争故障
+
+* 用代码实现竞争故障的例子，在这个例子中有20个线程出现来操作同一个文件，各个线程的操作都是一样的，即打开文件，读数据然后把数据取出然后覆盖写会，然后关闭文件
+
+```c
+// add.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+
+#define THRNUM 20
+#define LINESIZE 1024
+#define FNAME "/tmp/out"		// echo 1 > /tmp/out
+
+static void *thr_add(void *p)
+{
+    FILE *fp;
+    char linebuf[LINESIZE];
+
+    fp = fopen(FNAME, "r+");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    fgets(linebuf, LINESIZE, fp);
+    fseek(fp, 0, SEEK_SET);
+    slepp(1);
+    fprintf(fp, "%d\n", atoi(linebuf) + 1);
+
+    fclose(fp);
+
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    pthread_t tid[THRNUM];
+    int i, err;
+    for (i = 0; i < THRNUM; i++)
+    {
+        err = pthread_create(tid + i, NULL, thr_add, NULL);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = 0; i < THRNUM; i++)
+        pthread_join(tid[i], NULL);
+
+    exit(0);
+}
+ 
+```
+
+* 8：main线程负责创建20个线程
+* 25：因为读取文件的过程中，文件位置指针会向后走，因为要覆盖写回数据，所以要把文件位置指针重定位到文件的开始位置
+* 26：把读取的字符类型的数据变为整型进行自增操作，然后写回文件
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./add 
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ cat /tmp/out 
+
+# result
+# 如果线程不竞争的话，最后结果应该是21
+2
+```
+
+```c
+fgets(linebuf, LINESIZE, fp);
+fseek(fp, 0, SEEK_SET);
+slepp(1);
+fprintf(fp, "%d\n", atoi(linebuf) + 1);
+
+fclose(fp);
+```
+
+因为没有处理线程的竞争关系，所以一开始的时候就有很多线程获得了文件的初始值1，然后全部执行sleep语句阻塞1秒，最后的输出结果肯定也是从1开始自增，即结果为2，再全部把2写回文件，所以文件里的内容就是2
+
+线程同步：互斥量相当于某一个可能被多个线程所竞争的资源，那么在使用这个资源的时候需要加上一个锁，让抢到这把锁的线程去访问这个资源，其他没抢到锁的线程则需要等待，直到锁被释放然后再开始抢，以此类推
+
+>NAME
+>
+>> pthread_mutex_destroy, pthread_mutex_init — destroy and initialize a mutex
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_mutex_destroy(pthread_mutex_t *mutex);
+>> int pthread_mutex_init(pthread_mutex_t *restrict mutex, const pthread_mutexattr_t *restrict attr);
+>> pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER
+>
+>1. pthread_mutex_init：第一个参数为互斥量，也是说初始化一个锁；第二个参数是把这个互斥量的属性设置为什么
+>2. pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER：静态初始化方式，类型变量名用宏来初始化，pthread_mutex_init是动态初始化
+
+>NAME
+>
+>> pthread_mutex_lock, pthread_mutex_trylock, pthread_mutex_unlock — lock and unlock a mutex
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_mutex_lock(pthread_mutex_t *mutex);
+>> int pthread_mutex_trylock(pthread_mutex_t *mutex);
+>> int pthread_mutex_unlock(pthread_mutex_t *mutex);
+>
+>1. lock和unlock函数之间的一段函数被称为临界区
+
+* 使用互斥量重构代码
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+
+#define THRNUM 20
+#define LINESIZE 1024
+#define FNAME "/tmp/out"
+
+static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+
+static void *thr_add(void *p)
+{
+    FILE *fp;
+    char linebuf[LINESIZE];
+
+    fp = fopen(FNAME, "r+");
+    if (fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    pthread_mutex_lock(&mut);
+    fgets(linebuf, LINESIZE, fp);
+    fseek(fp, 0, SEEK_SET);
+    fprintf(fp, "%d\n", atoi(linebuf) + 1);
+
+    fclose(fp);
+    pthread_mutex_unlock(&mut);
+
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    pthread_t tid[THRNUM];
+    int i, err;
+    for (i = 0; i < THRNUM; i++)
+    {
+        err = pthread_create(tid + i, NULL, thr_add, NULL);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = 0; i < THRNUM; i++)
+        pthread_join(tid[i], NULL);
+
+    pthread_mutex_destroy(&mut);
+
+    exit(0);
+}
+
+```
+
+* 24-30：lock和unlock函数之间的代码被称为临界区，上了锁之后的临界区中的代码一个时间段中只能被一个线程所访问
+* 10，52：初始化一个互斥量，并且在main线程结束的时候应该销毁互斥量
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./add
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ cat /tmp/out 
+
+# result
+21
+```
+
+* 实现一个例子：用四个线程一直往终端输出abcd，即结果应该是`abcdabcdabcdabcd......`
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+
+#define THRNUM 4
+
+static pthread_mutex_t mut[THRNUM];
+
+static void *thr_func(void *p)
+{
+    int c;
+    int n = (int)p;
+    c = 'a' + n;
+    while (1)
+    {
+        write(1, &c, 1);
+    }
+
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    pthread_t tid[THRNUM];
+    int i, err;
+
+    for (i = 0; i < THRNUM; i++)
+    {
+
+        err = pthread_create(tid + i, NULL, thr_func, (void *)i);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    alarm(2);
+
+    for (i = 0; i < THRNUM; i++)
+        pthread_join(tid[i], NULL);
+
+    exit(0);
+}
+
+```
+
+* 40：因为第16-19行是一个死循环一直往终端输出数据，所以为了测试方便调用alarm信号在程序执行5秒后就会杀死当前的main线程
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./abcd 
+
+# result
+ababbabbbababababababababababababababababababababababababababababababababababaaababababababbbabbbbbbbbbbbbbbbbabbbabababababababababababaabababbababababababababababababababababababababababababababababababababababababcbdadabacdbacdabcdadbcadbcbabdbcadbcabacdbabcdababcbdadacbdacbcbdacbdadacbdacbcdabcdbadcbdddddddddddddddddddddddddddddddddddabcdabdacbdbacdbacdbadcbadcabdcabadcbadbcdabacdcdbdbdacbdacbdacacbdacbdacbdbdbdbabcdabcdababcdabcdbdcabdcabdababadcbadcdcdbacdbacccccccccccccccccccdbacacbdacbccccccccccccccccccccdabcacbdbacbdacacabdcacbdcacacabdcabdcabdcacbdacbdadacbdbacdbacdabcdabcdabcbadcbcbadcbadcbcadabcbdbacacdbdacbdadcbcbacdbacdbacdbacdbacdbacdbacdcbadacbdacacabadcbadcdbadcbadcdbacdbacdcbadcbadadacbdacbdadacbdacbdcbdcbdcbdccdcAlarm clock
+```
+
+可以看到输出结果是杂乱无章的，跟我们的要求工整地输出abcd序列相去甚远
+
+加入互斥量之后重构代码：把这四个线程做成一个锁链，也就是说打印完A之后去释放B的锁，加上A的锁；打印完B之后再去释放C的锁，加上B的锁；打印C之后再去释放D的锁，加上C的锁；打印完D之后再去释放A的锁，加上D的锁......
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+
+#define THRNUM 4
+
+static pthread_mutex_t mut[THRNUM];
+
+static int next(int n)
+{
+    if (n + 1 == THRNUM)
+        return 0;
+    return n + 1;
+}
+
+static void *thr_func(void *p)
+{
+    int c;
+    int n = (int)p;
+    c = 'a' + n;
+    while (1)
+    {
+        pthread_mutex_lock(mut + n);
+        write(1, &c, 1);
+        pthread_mutex_unlock(mut + next(n));
+    }
+
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    pthread_t tid[THRNUM];
+    int i, err;
+
+    for (i = 0; i < THRNUM; i++)
+    {
+
+        pthread_mutex_init(mut + i, NULL);
+        pthread_mutex_lock(mut + i);
+
+        err = pthread_create(tid + i, NULL, thr_func, (void *)i);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    pthread_mutex_unlock(mut + 0);
+
+    alarm(2);
+
+    for (i = 0; i < THRNUM; i++)
+        pthread_join(tid[i], NULL);
+
+    exit(0);
+}
+
+```
+
+* 38-50：4个互斥量的初始化，属性设置为默认，然后给初始化的互斥量加锁，即这个循环中实现的是：初始化，锁上，创建线程.....，也即创建了4个线程，并且创建了四把锁，然后把这四把锁都锁上了
+* 52：执行完循环之后，先释放第一把锁，也就是打印输出A的锁
+* 25-27：给自己加锁，打印完了之后，给下一个线程释放锁
+* 11-16：获取下一个线程
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./abcd 
+
+# result
+abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdaAlarm clock
+```
+
+
+
 
 
 
