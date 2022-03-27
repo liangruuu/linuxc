@@ -967,11 +967,167 @@ liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ .
 abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdaAlarm clock
 ```
 
+# 线程-线程池实现
 
+* 使用线程池重构质数筛选
 
+![image-20220327135416279](index4.assets/image-20220327135416279.png)
 
+```c
+// primer_pool.c
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <pthread.h>
 
+#define LEFT 30000000
+#define RIGHT 30000200
+#define THRNUM 4
+
+static int num = 0;
+static pthread_mutex_t mut_num = PTHREAD_MUTEX_INITIALIZER;
+
+static void *thr_prime(void *p)
+{
+    int i, j, mark;
+
+    while (1)
+    {
+        pthread_mutex_lock(&mut_num);
+        while (num == 0)
+        {
+            pthread_mutex_unlock(&mut_num);
+            sched_yield();
+            pthread_mutex_lock(&mut_num);
+        }
+        if (num == -1)
+        {
+            pthread_mutex_unlock(&mut_num);
+            break;
+        }
+        i = num;
+        num = 0;
+        pthread_mutex_unlock(&mut_num);
+
+        mark = 1;
+        for (j = 2; j < i / 2; j++)
+        {
+            if (i % j == 0)
+            {
+                mark = 0;
+                break;
+            }
+        }
+        if (mark)
+            printf("[%d] %d is a primer\n", (int)p, i);
+    }
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    int i, err;
+    pthread_t tid[THRNUM];
+    struct thr_arg_st *p;
+    void *ptr;
+
+    for (i = 0; i < THRNUM; i++)
+    {
+        err = pthread_create(tid + i, NULL, thr_prime, (void *)i);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        pthread_mutex_lock(&mut_num);
+        while (num != 0)
+        {
+            pthread_mutex_unlock(&mut_num);
+            sched_yield();
+            pthread_mutex_lock(&mut_num);
+        }
+
+        num = i;
+        pthread_mutex_unlock(&mut_num);
+    }
+
+    pthread_mutex_lock(&mut_num);
+    while (num != 0)
+    {
+        pthread_mutex_unlock(&mut_num);
+        sched_yield();
+        pthread_mutex_lock(&mut_num);
+    }
+    num = -1;
+    pthread_mutex_unlock(&mut_num);
+
+    for (i = 0; i < THRNUM; i++)
+        pthread_join(tid[i], NULL);
+
+    pthread_mutex_destroy(&mut_num);
+
+    exit(0);
+}
+
+```
+
+* 13：线程池大小为4
+* 72-84：74-83行的加解锁是main线程的操作，而24-38行的加解锁是兄弟线程的操作，74行的加锁操作是main线程查看num的数据来判断是否应该把新的数据放到num中，77行的解锁是main线程的操作执行完后释放锁从而可以让兄弟线程去抢这把锁，79行的加锁是等兄弟线程操作完之后然后让main线程查看num的值从而进入下一个while循环中
+* 78：意思为出让调度器给别的线程，可以理解为间隔非常短的sleep，因为如果不加sched_yield函数的话，就有极大概率使得加锁完之后立刻解锁
+* 93：循环结束后说明把201个任务都分配给线程了，然后通知线程退出
+* 22：线程不是做一次任务就结束了的，而是不停地抢任务计算，抢任务计算....
+* 25-37：注意临界区的跳转语句，只要尝试跳转到临界区外的话就需要解锁，比如34行的break是跳转到52行的，已经出了临界区，所以要执行一次解锁操作，否则就会导致死锁
+* 86、93、94：这三个操作是连在一起的，因为要对num赋值，所以需要锁操作，但是期间添加了一个循环
+* 87-92：需要特别注意的一点是，main线程也会参与到共享变量的竞争，所以为了防止main线程自己抢自己的数据，则使用一个循环一直循环判断num为0时，也就是说num被别的进程处理了之后才会跳出循环，这一段的锁操作也需要满足加锁和解锁必须一对一
+
+判断是否需要添加锁操作的一个依据是，如果要对共享变量操作的话，就把锁操作添加到这个变量的两端，比如25行的num。注意加锁之后一定要添加解锁操作，至于加在哪里要具体问题具体分析
+
+```c
+pthread_mutex_lock(&mut_num);
+while (num != 0)
+{
+    pthread_mutex_unlock(&mut_num);
+    sched_yield();
+    pthread_mutex_lock(&mut_num);
+}
+
+num = i;
+pthread_mutex_unlock(&mut_num);
+```
+
+以上面的代码片段为例分析，因为num是线程共享变量，所以需要在num两端加上锁操作，首先在第一行加锁，对num操作判断完后就执行第3行的解锁，假如没有第6行的加锁操作的话，就会按照代码的while逻辑，如果num!=0，就会重新执行第4行的加锁，这下就没了解锁操作，所以需要在第6行添加解锁操作，如果跳出循环的话，因为第6行的加锁操作，并且因为在第9行有对num的操作，所以需要在第10行添加解锁操作
+
+```shell
+liangruuu@liangruuu-virtual-machine:~/study/linuxc/code/parallel/thread/posix$ ./primer_pool 
+
+# result
+[3] 30000023 is a primer
+[2] 30000041 is a primer
+[0] 30000037 is a primer
+[1] 30000001 is a primer
+[0] 30000071 is a primer
+[2] 30000059 is a primer
+[3] 30000049 is a primer
+[1] 30000079 is a primer
+[0] 30000083 is a primer
+[3] 30000133 is a primer
+[1] 30000137 is a primer
+[2] 30000109 is a primer
+[1] 30000163 is a primer
+[2] 30000169 is a primer
+[3] 30000167 is a primer
+[0] 30000149 is a primer
+[2] 30000199 is a primer
+[1] 30000193 is a primer
+```
 
 
 
