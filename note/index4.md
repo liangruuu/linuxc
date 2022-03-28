@@ -2182,5 +2182,52 @@ int mysem_add(mysem_t *ptr, int n)
 * 1：向mysem_t归还n个资源量
 * 7：获取资源量函数中是pthread_cond_wait函数，所以归还资源量函数中对应的是pthread_cond_broadcast函数，如果这里写的是pthread_cond_signal函数的话意思是唤醒一个线程，而pthread_cond_broadcast是唤醒所有线程，如果有3个线程执行sub函数后被阻塞住的话，并且这三个线程所需资源量分别为1，2，3，但是执行完add函数之后归还了10个资源，那么就可以一次性满足所有处于阻塞状态的线程，所以需要使用pthread_cond_broadcast函数唤醒全部阻塞线程(408 操作系统经典内容)
 
+![image-20220328152935201](index4.assets/image-20220328152935201.png)
+
+经过2秒之后
+
+![image-20220328153026811](index4.assets/image-20220328153026811.png)
+
+# 线程-线程属性
+
+`int pthread_create(pthread_t *thread, const pthread_attr_t *attr, oid *(*start_routine) (void *), void *arg);`中的第二个参数就是线程的属性，我们之前一直写的都是NULL，也就是说在创建线程的时候并不指定它的特殊属性
+
+>NAME
+>
+>> pthread_attr_init, pthread_attr_destroy - initialize and destroy thread attributes object
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_attr_init(pthread_attr_t *attr);
+>> int pthread_attr_destroy(pthread_attr_t *attr);
+>>
+>> Compile and link with -pthread.
+>
+>
+
+// TODO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
