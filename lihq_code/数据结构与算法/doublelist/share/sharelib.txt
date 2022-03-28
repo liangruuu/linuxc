@@ -1,0 +1,29 @@
+动态库
+
+libxx.o
+xx指库名称
+
+gcc -shared -fpic -o libxx.so xx.c
+
+发布到
+/usr/local/include
+头文件路径
+/usr/local/lib
+库文件路径
+
+
+在
+/etc/ld.so.conf
+中添加路径
+/usr/local/lib/
+
+命令行输入
+/sbin/ldconfig  
+# 重读 /etc/ld.so.conf
+
+gcc -I/usr/local/include -L/usr/local/lib -o main main.o -lxx
+-l 参数必须在最后，有依赖
+
+ldd ./xxx
+输出共享库依赖关系
+

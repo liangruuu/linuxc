@@ -1,0 +1,6 @@
+1）问题是fb0存在，而open失败，
+解决方法很简单：sudo chmod 777 /dev/fb0；
+即将其权限改为可读写。
+
+2）CentOS 7 修改屏幕分辨率
+https://jingyan.baidu.com/article/2c8c281dad52af0008252adc.html
