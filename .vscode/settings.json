@@ -4,6 +4,7 @@
         "*.wxss": "css",
         "*.wxs": "javascript",
         "*.cu": "cpp",
-        "mytbf.h": "c"
+        "mytbf.h": "c",
+        "unistd.h": "c"
     }
 }

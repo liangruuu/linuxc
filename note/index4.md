@@ -1976,11 +1976,211 @@ int main()
 
 # 线程-信号量
 
+区别于之前的互斥量pthread_mutex_t，互斥量是一个以独占形式来使用某个资源的机制，在数据结构范畴抽象出了一个哲学家就餐问题，假设5根筷子不是放在每两人中间，而是桌子上有一个容器，这个容器里放着5根筷子，这个问题用互斥量来解决的话就会出现：一个人在就餐的时候因为筷子是作为共享变量，所以就会给筷子设置一个锁，所以即使有5根筷子，但是也只会有一个人在同一时间使用2根筷子，直到使用完之后才会把筷子这个资源释放掉；再比如文件，如果按照之前互斥量的做法的话，一个人在读文件的时候也相当于占有了这个文件资源，也就是说给这个文件资源上了锁，其他人不能对文件进行操作，但是实际上是能够多个进程实现对一个文件进行同时读的，当然即使有些文件是能够共享访问的，但是还是需要对其设置一个上限数量，比如说5根筷子最多两个人共享，再比如说读文件，可能考虑到资源限制，约定可以多个人只读文件，但是一定得有一个上限，比如20个人同时读。其实可以想象成有20个token，每有一个用户读文件，则token自减1，有人释放文件资源则token+1，当如果有20个人在同时读的话那么token值就为0，也就说明到达了资源上线，如果再有用户来读文件的话就必须得等其余20个用户有人释放读文件权限之后才能读文件，也就是说在资源能够在一定可容纳范围内共享的时候互斥量就有一点不好用了，"我用的时候其他人都不能用"
+
+信号量把当前资源量初始化一个上限，当资源总量减到不能减的话就说明不能再使用了。可以这样理解：互斥量是bool类型除了是就是否，用到的时候就是一种状态，不用的时候就是另外一种状态；信号量可以理解成int型，有加有减，值必须得够减才能使用，不够减就得等待。实际上信号量没有一种单独的机制去实现，得用互斥量+条件变量来完成信号量的使用
+
+我们之前使用分块法，交叉法，和池类算法来实现指数筛选的程序，这里使用信号量来重构
+
+用条件变量和互斥量来完成一个记录次数的有资源上线的资源共享，当前用的是201个线程来质数计算的程序，但是之后可以产生201个线程，但是同一时刻不行，同一时刻最多只能同时存在N个线程
+
+```c
+// main.c
+
+#define LEFT 30000000
+#define RIGHT 30000200
+#define THRNUM (RIGHT - LEFT + 1)
+#define N 4
+```
+
+```c
+#ifndef MYSEM_H__
+#define MYSEM_H__
+
+typedef void mysem_t;
+
+mysem_t *mysem_init(int);
+
+int mysem_add(mysem_t *, int);
+
+int mysem_sub(mysem_t *, int);
+
+int mysem_destroy(mysem_t *);
+
+#endif
 
 
+struct mysem_st
+{
+    int value;
+    pthread_mutex_t mut;
+    pthread_cond_t cond;
+};
+```
+
+* 6、17-22：初始化时需要把资源总量值作为参数，返回值应该是一个结构体标识，这个结构体里无非有的是资源总量value，在获取value的时候其他线程就不能取，某一个时刻针对value的操作当然还是以单线程来实现的，因为不能让多个线程对一个值进行操作，所以需要一个互斥量pthread_mutex_t，在获取资源value的时候如果发现资源不够用的话，当前线程应该阻塞住并且等待，这种等待要么是查询法使用一个while，要么使用通知法，有现成归还资源的时候就通知当前线程，所以需要一个条件变量pthread_cond_t
+* 10、12：归还资源量add和减掉资源量sub，add操作即对mysem_t中的value属性进行加操作，而对于sub操作，如果当前线程需要3个资源量，但是目前资源总量为1，这时是不能获取资源的。所以只有value值大于等于要求的资源总量时才能对value值进行减操作
+
+```c
+// main.c
 
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <pthread.h>
+#include "mysem.h"
 
+#define LEFT 30000000
+#define RIGHT 30000200
+#define THRNUM (RIGHT - LEFT + 1)
+#define N 4
+
+struct thr_arg_st
+{
+    int n;
+};
+
+static mysem_t *sem;
+
+static void *thr_prime(void *p)
+{
+    int i, j, mark;
+    i = ((struct thr_arg_st *)p)->n;
+    mark = 1;
+    for (j = 2; j < i / 2; j++)
+    {
+        if (i % j == 0)
+        {
+            mark = 0;
+            break;
+        }
+    }
+    if (mark)
+        printf("%d is a primer\n", i);
+
+    sleep(2);
+
+    mysem_add(sem, 1);
+    pthread_exit(p);
+}
+
+int main()
+{
+    int i, err;
+    pthread_t tid[THRNUM];
+    struct thr_arg_st *p;
+    void *ptr;
+
+    sem = mysem_init(N);
+    if (sem == NULL)
+    {
+        fprintf(stderr, "mysem_init() failed!\n");
+        exit(1);
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        mysem_sub(sem, 1);
+
+        p = malloc(sizeof(*p));
+        if (p == NULL)
+        {
+            perror("malloc()");
+            exit(1);
+        }
+        p->n = i;
+        err = pthread_create(tid + (i - LEFT), NULL, thr_prime, p);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        pthread_join(tid[i - LEFT], &ptr);
+        free(ptr);
+    }
+
+    mysem_destroy(sem);
+    exit(0);
+}
+
+```
+
+* 54、86：初始化和销毁信号量
+* 63：在创建一个线程的时候企图减少资源量，所以需要判断是否能成功获取资源量，如果能获取也即结构体中的value还大于0的话，才能够去创建线程
+* 43：线程即将结束的时候就归还资源量
+* 41：等价于每个线程被创建出来需要干活2秒，这样就可以使用ps命令查看当前线程的关系
+
+```c
+mysem_t *mysem_init(int initval)
+{
+    struct mysem_st *me;
+    me = malloc(sizeof(*me));
+    if (me == NULL)
+        return NULL;
+
+    me->value = initval;
+    pthread_mutex_init(&me->mut, NULL);
+    pthread_cond_init(&me->cond, NULL);
+
+    return me;
+}
+```
+
+```c
+int mysem_destroy(mysem_t *ptr)
+{
+    struct mysem_st *me = ptr;
+    pthread_mutex_destroy(&me->mut);
+    pthread_cond_destroy(&me->cond);
+    free(me);
+
+    return 0;
+}
+```
+
+```c
+int mysem_sub(mysem_t *ptr, int n)
+{
+    struct mysem_st *me = ptr;
+    pthread_mutex_lock(&me->mut);
+
+    while (me->value < n)
+        pthread_cond_wait(&me->cond, &me->mut);
+
+    me->value -= n;
+    pthread_mutex_unlock(&me->mut);
+
+    return n;
+}
+```
+
+* 1：从mysem_t获取n个资源量
+* 6-7：如果ptr里的value值小于n的话是不能获取资源量的，所以就必须使用wait函数阻塞在这里
+
+```c
+int mysem_add(mysem_t *ptr, int n)
+{
+    struct mysem_st *me = ptr;
+    pthread_mutex_lock(&me->mut);
+
+    me->value += n;
+    pthread_cond_broadcast(&me->cond);
+    pthread_mutex_unlock(&me->mut);
+
+    return n;
+}
+```
+
+* 1：向mysem_t归还n个资源量
+* 7：获取资源量函数中是pthread_cond_wait函数，所以归还资源量函数中对应的是pthread_cond_broadcast函数，如果这里写的是pthread_cond_signal函数的话意思是唤醒一个线程，而pthread_cond_broadcast是唤醒所有线程，如果有3个线程执行sub函数后被阻塞住的话，并且这三个线程所需资源量分别为1，2，3，但是执行完add函数之后归还了10个资源，那么就可以一次性满足所有处于阻塞状态的线程，所以需要使用pthread_cond_broadcast函数唤醒全部阻塞线程(408 操作系统经典内容)
 
 
 
