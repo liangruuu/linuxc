@@ -1590,6 +1590,392 @@ pthread_mutex_unlock(&me->mut);
 
 查询法多半会处于盲等状态，不停地主动去查看变量状态，条件变量可以把其变为通知形式，条件变量中涉及到一个类型：pthread_cond_t，常规操作包括init和destory，具体用法涉及到`pthread_cond_broadcast`或者是`pthread_cond_signal`去发送一个消息
 
+>NAME
+>
+>> pthread_cond_destroy, pthread_cond_init — destroy and initialize condition variables
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_cond_destroy(pthread_cond_t *cond);
+>> int pthread_cond_init(pthread_cond_t *restrict cond, const pthread_condattr_t *restrict attr);
+>> pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+>
+>1. 和互斥量一样，条件变量也提供了两种初始化的方式，一种是静态初始化，一种是动态初始化，init是用动态初始化的方式，首先要指定条件变量的地址，然后机上条件变量的属性
+
+>NAME
+>
+>> pthread_cond_broadcast, pthread_cond_signal — broadcast or signal a condition
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_cond_broadcast(pthread_cond_t *cond);
+>> int pthread_cond_signal(pthread_cond_t *cond);
+>
+>1. pthread_cond_broadcast指的是把所有的等待都唤醒
+>2. pthread_cond_signal是唤醒任意一个，至于会唤醒哪一个是不确定的，它们两个函数的参数都是一个条件变量
+
+>NAME
+>
+>> pthread_cond_timedwait, pthread_cond_wait — wait on a condition
+>
+>SYNOPSIS
+>
+>> #include <pthread.h>
+>>
+>> int pthread_cond_timedwait(pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex, const struct timespec *restrict abstime);
+>> int pthread_cond_wait(pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex);
+>
+>1. wait和timedwait中wait是死等一个行为的发生，而timedwait是在规定时间内如果没有行为发生的话就结束，wait函数的第二个参数是一个互斥量，这个wait函数就相当于解锁等待
+>    
+
+使用上面的函数来重构刚才的代码，对于通知法，循环判断如果token<=0的话当前线程就阻塞住，阻塞到有线程来通知该线程为止，也就是当前的token值有可能不是0了，条件变量是来通知token值发生变化的，并且条件变量要和互斥量mut结合起来使用
+
+```c
+struct mytbf_st
+{
+    int cps;
+    int burst;
+    int token;
+    int pos;
+    pthread_mutex_t mut;
+    pthread_cond_t cond;
+};
+
+
+
+mytbf_t *mytbf_init(int cps, int burst)
+{
+    struct mytbf_st *me;
+
+    pthread_once(&init_once, module_load);
+
+    me = malloc(sizeof(*me));
+    if (me == NULL)
+        return NULL;
+
+    me->token = 0;
+    me->cps = cps;
+    me->burst = burst;
+    pthread_mutex_init(&me->mut, NULL);
+    pthread_cond_init(&me->cond, NULL);
+
+    pthread_mutex_lock(&mut_job);
+    int pos = get_free_pos_unlocked();
+    if (pos < 0)
+    {
+        pthread_mutex_unlock(&mut_job);
+        free(me);
+        return NULL;
+    }
+
+    me->pos = pos;
+    job[pos] = me;
+    pthread_mutex_unlock(&mut_job);
+
+    return me;
+}
+
+int mytbf_destroy(mytbf_t *ptr)
+{
+
+    struct mytbf_st *me = ptr;
+    pthread_mutex_lock(&mut_job);
+    job[me->pos] = NULL;
+    pthread_mutex_unlock(&mut_job);
+
+    pthread_mutex_destroy(&me->mut);
+    pthread_cond_destroy(&me->cond);
+    free(ptr);
+}
+```
+
+* 8、27、54：条件变量的声明，初始化和销毁
+
+定义了条件变量之后就可以使用通知法来重构fetchtoken函数了
+
+```c
+int mytbf_fetchtoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+    int n;
+
+    if (size <= 0)
+        return -EINVAL;
+
+    pthread_mutex_lock(&me->mut);
+    while (me->token <= 0)
+    {
+        pthread_cond_wait(&me->cond, &me->mut);
+
+        // pthread_mutex_unlock(&me->mut);
+        // sched_yield();
+        // pthread_mutex_lock(&me->mut);
+    }
+
+    n = min(me->token, size);
+    me->token -= n;
+    pthread_mutex_unlock(&me->mut);
+
+    return n;
+}
+```
+
+* 12：pthread_cond_wait的第一个参数是条件变量，第二个参数是互斥量mutex，原来的三行代码的功能是发现token值不是想要的值的话那就解锁，解锁完之后稍微等一下然后加锁，然后在执行循环判断，替换成wait之后则是发现条件不成立即token值不满足循环条件那就解锁，然后调用pthread_cond_wait函数等待，直到一个pthread_cond_broadcast或者pthread_cond_signal函数来打断，之前写过一个筛选质数的程序，比如下游的很多线程在等任务，main线程把一个新的任务放在num中，如果只是通知下游的任意一个就用pthread_cond_signal，如果全部下游线程都要被通知到则使用pthread_cond_broadcast
+
+    整个流程是：循环判断token值不满足条件，则先解锁me->mut进入等待，但是这个等待不是sched_yield，而是等待一个pthread_cond_broadcast或者pthread_cond_signal把等待打断，被唤醒之后main线程第一个行为就是去抢锁执行加锁操作，然后再去判断循环条件是否满足。如果此时锁被别的线程抢走了，那么当前的wait原语就会阻塞在抢锁阶段直到其他线程把锁释放了然后接着抢，pthread_cond_wait理论上应该放在一个循环语句中，因为未必waiat被其他线程打断了就满足判断条件
+
+    其实可以发现pthread_cond_wait等价的14-16行代码中，9和14一一对应，16和21一一对应，都是加锁->执行操作->解锁
+
+```c
+static void *thr_alarm(void *p)
+{
+    while (1)
+    {
+        pthread_mutex_lock(&mut_job);
+        for (int i = 0; i < MYTBF_MAX; i++)
+        {
+            if (job[i] != NULL)
+            {
+                pthread_mutex_lock(&job[i]->mut);
+                job[i]->token += job[i]->cps;
+                if (job[i]->token > job[i]->burst)
+                    job[i]->token = job[i]->burst;
+
+                pthread_cond_broadcast(&job[i]->cond);
+                pthread_mutex_unlock(&job[i]->mut);
+            }
+        }
+        pthread_mutex_unlock(&mut_job);
+        sleep(1);
+    }
+}
+
+
+int mytbf_returntoken(mytbf_t *ptr, int size)
+{
+    struct mytbf_st *me = ptr;
+
+    if (size <= 0)
+        return -EINVAL;
+
+    pthread_mutex_lock(&me->mut);
+    me->token += size;
+    if (me->token > me->burst)
+        me->token = me->burst;
+
+    pthread_cond_broadcast(&me->cond);
+    pthread_mutex_unlock(&me->mut);
+
+    return size;
+}
+```
+
+* 15、37：所有会使得token值发生变化的函数都应该在相应位置加上pthread_cond_broadcast发通知
+
+<img src="index4.assets/image-20220328084713163.png" alt="image-20220328084713163" style="zoom:80%;" />
+
+使用条件变量重构筛选质数代码
+
+筛选质数代码中也存在盲等状态，不管是main线程还是其他线程都在不停地对num值进行(抢num、看状态)*N，这其实还是查询法的一种方式，如果把其变为通知法，则是下游线程一直处于等待状态，上游往num中放了一个任务之后发一个通知，下游中的任意一个线程被pthread_cond_broadcast或者pthread_cond_signal唤醒然后去获取任务即可
+
+```c
+// primer_pool_cond.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <pthread.h>
+
+#define LEFT 30000000
+#define RIGHT 30000200
+#define THRNUM 4
+
+static int num = 0;
+static pthread_mutex_t mut_num = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cond_num = PTHREAD_COND_INITIALIZER;
+
+static void *thr_prime(void *p)
+{
+    int i, j, mark;
+
+    while (1)
+    {
+        pthread_mutex_lock(&mut_num);
+        while (num == 0)
+        {
+            // pthread_mutex_unlock(&mut_num);
+            // sched_yield();
+            // pthread_mutex_lock(&mut_num);
+            pthread_cond_wait(&cond_num, &mut_num);
+        }
+        if (num == -1)
+        {
+            pthread_mutex_unlock(&mut_num);
+            break;
+        }
+        i = num;
+        num = 0;
+
+        pthread_cond_broadcast(&cond_num);
+        pthread_mutex_unlock(&mut_num);
+
+        mark = 1;
+        for (j = 2; j < i / 2; j++)
+        {
+            if (i % j == 0)
+            {
+                mark = 0;
+                break;
+            }
+        }
+        if (mark)
+            printf("[%d] %d is a primer\n", (int)p, i);
+    }
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    int i, err;
+    pthread_t tid[THRNUM];
+    struct thr_arg_st *p;
+    void *ptr;
+
+    for (i = 0; i < THRNUM; i++)
+    {
+        err = pthread_create(tid + i, NULL, thr_prime, (void *)i);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    for (i = LEFT; i <= RIGHT; i++)
+    {
+        pthread_mutex_lock(&mut_num);
+        while (num != 0)
+        {
+            pthread_cond_wait(&cond_num, &mut_num);
+        }
+
+        num = i;
+        pthread_cond_signal(&cond_num);
+        pthread_mutex_unlock(&mut_num);
+    }
+
+    pthread_mutex_lock(&mut_num);
+    while (num != 0)
+    {
+        pthread_cond_wait(&cond_num, &mut_num);
+        // pthread_mutex_unlock(&mut_num);
+        // sched_yield();
+        // pthread_mutex_lock(&mut_num);
+    }
+    num = -1;
+    pthread_cond_broadcast(&cond_num);
+    pthread_mutex_unlock(&mut_num);
+
+    for (i = 0; i < THRNUM; i++)
+        pthread_join(tid[i], NULL);
+
+    pthread_mutex_destroy(&mut_num);
+    pthread_cond_destroy(&cond_num);
+
+    exit(0);
+}
+
+```
+
+* 15、103：条件变量的静态初始化和销毁
+* 39、83、95：因为循环是针对num值进行判断的，所以只要是对num值做出改变的位置都需要加上pthread_cond_broadcast或者pthread_cond_signal来唤醒等待
+* 25、28、30、35：25-28一一对应，30-35一一对应
+
+用条件变量重构acbcd.c程序
+
+```c
+// abcd_cond.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+
+#define THRNUM 4
+
+static int num = 0;
+static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+static int next(int n)
+{
+    if (n + 1 == THRNUM)
+        return 0;
+    return n + 1;
+}
+
+static void *thr_func(void *p)
+{
+    int n = (int)p;
+    int c = 'a' + n;
+    while (1)
+    {
+        pthread_mutex_lock(&mut);
+        while (num != n)
+            pthread_cond_wait(&cond, &mut);
+
+        write(1, &c, 1);
+        num = next(num);
+        pthread_cond_broadcast(&cond);
+        pthread_mutex_unlock(&mut);
+    }
+
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    pthread_t tid[THRNUM];
+    int i, err;
+
+    for (i = 0; i < THRNUM; i++)
+    {
+
+        err = pthread_create(tid + i, NULL, thr_func, (void *)i);
+        if (err)
+        {
+            fprintf(stderr, "pthread_create():%s\n", strerror(err));
+            exit(1);
+        }
+    }
+
+    alarm(2);
+
+    for (i = 0; i < THRNUM; i++)
+        pthread_join(tid[i], NULL);
+
+    pthread_mutex_destroy(&mut);
+    pthread_cond_destroy(&cond);
+
+    exit(0);
+}
+
+```
+
+* 12：之前是创建了四把锁，而现在只需要创建一把锁，然后设置一个全局变量num，如果当前的值跟num不等的话，就调用pthread_cond_wait等待，直到其中一个完成任务的线程执行完之后再调用pthread_cond_broadcast或者pthread_cond_signal唤醒其他线程
+
+
+
+# 线程-信号量
+
 
 
 

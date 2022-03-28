@@ -22,9 +22,9 @@ static void *thr_prime(void *p)
         pthread_mutex_lock(&mut_num);
         while (num == 0)
         {
-            pthread_mutex_unlock(&mut_num);
-            sched_yield();
-            pthread_mutex_lock(&mut_num);
+            // pthread_mutex_unlock(&mut_num);
+            // sched_yield();
+            // pthread_mutex_lock(&mut_num);
         }
         if (num == -1)
         {
