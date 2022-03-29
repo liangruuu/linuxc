@@ -416,6 +416,653 @@ int main()
 
 因为当前程序处于盲等状态，忙在假错(看一下没内容——>看一下没内容)*N，对应到状态机图上表现为一直读状态上转圈
 
+# 中继引擎实例实现
+
+把刚才的程序改造成一个中继引擎
+
+可以把之前的两个设备互传数据的模型称为job，fd1、fd2、fsm21和fsm12就能用来描述一个job，现在要来实现一个服务的话也就是说能同时支持多少个这样的job的存在，比如同时支持1w个job，对应的文件描述符fd的个数为2w个，如果用数组来进行存储的话，那么数组空间为1w个，则可以把当前产生的job存入数组中。现在有两种思路给用户提供job，第一种给用户结构体的起始位置，第二种是给用户存放结构体的数组下标，每次有一对任务产生，就有一个job结构体产生，上限为1w，也即最多能打开2w个有效文件
+
+我们在下面的实现代码中需要确保不同job中的文件互不干扰，并且为了方便测试只在main函数中测试两个job
+
+```c
+// relayer.h
+
+#ifndef RELAYER_H__
+#define RELAYER_H__
+
+#include <stdint.h>
+
+#define REL_JOBMAX 10000
+
+struct rel_stat_st
+{
+    int state;
+    int fd1;
+    int fd2;
+    int64_t count12, count21; // 1向2发送了多少字节，2向1发送了多少字节
+};
+
+int rel_addjob(int fd1, int fd2);
+/*
+    return >= 0			成功，返回当前任务ID
+           == -EINVAL	失败，参数非法
+           == -ENOSPC   失败，任务数组满
+           == -ENOMEM   失败，内存分配有误
+*/
+
+int rel_canceljob(int id);
+/*
+    return == 0			成功，指定任务成功取消
+           == -EINVAL	失败，参数非法
+           == -EBUSY    失败，任务早已被取消
+*/
+
+int rel_waitjob(int id, struct rel_stat_st *);
+/*
+    return == 0			成功，指定任务已终止并返回状态
+           == -EINVAL	失败，参数非法
+
+*/
+
+int rel_statjob(int id, struct rel_stat_st *);
+/*
+
+    return == 0			成功，指定任务状态返回
+           == -EINVAL	失败，参数非法
+
+*/
+#endif
+
+
+enum
+{
+    STATE_RUNNING = 1,
+    STATE_CANCELED,
+    STATE_OVER
+}
+```
+
+* 18：给存放job的数组添加job，返回数组下标，即当前任务的ID
+* 26：反悔机制，即取消任务
+* 33、10-16、50-55：回收资源机制，设置任务状态rel_stat_st结构体，以便查看job的状态，job有三种状态，分别是STATE_RUNNING、STATE_CANCELED、STATE_OVER
+* 40：获取当前任务的状态回填至rel_stat_st类型的变量
+
+```c
+// main.c
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
+#include "relayer.h"
+
+//两个设备为一对互传数据
+#define TTY1 "/dev/tty12"
+#define TTY2 "/dev/tty10"
+
+#define TTY3 "/dev/tty9"
+#define TTY4 "/dev/tty8"
+
+int main(int argc, char **argv)
+{
+    int fd1, fd2, fd3, fd4;
+    int job1, job2;
+    fd1 = open(TTY1, O_RDWR); //先以阻塞打开（故意先阻塞形式）
+    if (fd1 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd1, "TTY1\n", 5);
+    fd2 = open(TTY2, O_RDWR | O_NONBLOCK); //非阻塞
+    if (fd2 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd2, "TTY2\n", 5);
+
+    job1 = rel_addjob(fd1, fd2); //添加一对终端互传数据
+    if (job1 < 0)
+    {
+        fprintf(stderr, "rel_addjob():%s\n", strerror(-job1));
+        exit(1);
+    }
+
+    fd3 = open(TTY3, O_RDWR); //先以阻塞打开（故意先阻塞形式）
+    if (fd3 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd3, "TTY3\n", 5);
+    fd4 = open(TTY4, O_RDWR | O_NONBLOCK); //非阻塞
+    if (fd4 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd4, "TTY4\n", 5);
+
+    job2 = rel_addjob(fd3, fd4); //添加一对终端互传数据
+    if (job2 < 0)
+    {
+        fprintf(stderr, "rel_addjob():%s\n", strerror(-job2));
+        exit(1);
+    }
+
+    while (1)
+        pause();
+
+    close(fd4);
+    close(fd3);
+    close(fd2);
+    close(fd1);
+
+    exit(0);
+}
+```
+
+main函数不再需要定义状态机的结构体和状态机定义和操作，只需要调用方法，方法在relayer.c中定义
+
+* 38、60：添加一对终端互传数据
+* 67-68：不能让程序结束才能让任务持续执行
+
+```c
+//状态机
+struct rel_fsm_st
+{
+    int state;         //记录状态
+    int sfd;           //源文件
+    int dfd;           //目的文件
+    char buf[BUFSIZE]; //中间缓冲区
+    int len;           //读到的长度
+    int pos;           //写的过程如果一次没有写完，记录上次写的位置
+    char *err;         //错误信息
+    int64_t count;     //输出字符数量
+};
+
+//每一对终端结构体
+struct rel_job_st
+{
+    //两个终端
+    int fd1;
+    int fd2;
+    //该对终端状态STATE_RUNNING，STATE_CANCELED, STATE_OVER
+    int job_state;
+    //两个终端的状态机结构体
+    struct rel_fsm_st fsm12, fsm21;
+    //用来退出复原状态
+    int fd1_save, fd2_save;
+};
+
+```
+
+* 15：之前的rel_stat_st结构体是给用户看的，这里的rel_job_st是真正进行操作处理job的结构体，相当于rel_stat_st是部分的封装与隐藏
+
+```c
+#define REL_JOBMAX 10000
+
+static struct rel_job_st *rel_job[REL_JOBMAX];
+static pthread_mutex_t mut_rel_job = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+
+int rel_addjob(int fd1, int fd2)
+{
+    struct rel_job_st *me;
+    int pos;
+
+    pthread_once(&init_once, module_load);
+    me = malloc(sizeof(*me));
+    if (me == NULL) //空间问题
+        return -ENOMEM;
+    me->fd1 = fd1;
+    me->fd2 = fd2;
+    me->job_state = STATE_RUNNING; //该对终端设置正在运行
+
+    me->fd1_save = fcntl(me->fd1, F_GETFL);
+    fcntl(me->fd1, F_SETFL, me->fd1_save | O_NONBLOCK); //非阻塞	打开
+
+    me->fd2_save = fcntl(me->fd2, F_GETFL);
+    fcntl(me->fd2, F_SETFL, me->fd2_save | O_NONBLOCK); //非阻塞	打开
+
+    me->fsm12.sfd = me->fd1;
+    me->fsm12.dfd = me->fd2;
+    me->fsm12.state = STATE_R;
+
+    me->fsm21.sfd = me->fd2;
+    me->fsm21.dfd = me->fd1;
+    me->fsm21.state = STATE_R;
+
+    pthread_mutex_lock(&mut_rel_job);
+    pos = get_free_pos_unlocked();
+    if (pos < 0)
+    {
+        pthread_mutex_unlock(&mut_rel_job);
+        fcntl(me->fd1, F_SETFL, me->fd1_save);
+        fcntl(me->fd2, F_SETFL, me->fd2_save);
+        free(me);
+        return -ENOSPC;
+    }
+    rel_job[pos] = me;
+    pthread_mutex_unlock(&mut_rel_job);
+    return pos;
+}
+
+static void module_load(void)
+{
+    int err;
+    pthread_t tid_relayer;
+    err = pthread_create(&tid_relayer, NULL, thr_relayer, NULL);
+    if (err)
+    {
+        fprintf(stderr, "pthread_create():%s\n", strerror(err));
+        exit(1);
+    }
+}
+
+static void *thr_relayer(void *p)
+{
+    int i;
+    while (1)
+    {
+        pthread_mutex_lock(&mut_rel_job);
+        for (i = 0; i < REL_JOBMAX; i++)
+        {
+            if (rel_job[i] != NULL)
+            {
+                if (rel_job[i]->job_state == STATE_RUNNING)
+                {
+                    fsm_driver(&rel_job[i]->fsm12);
+                    fsm_driver(&rel_job[i]->fsm21);
+                    if (rel_job[i]->fsm12.state == STATE_T && rel_job[i]->fsm21.state == STATE_T)
+                        rel_job[i]->job_state = STATE_OVER;
+                }
+            }
+        }
+        pthread_mutex_unlock(&mut_rel_job);
+    }
+}
+
+//状态转移函数
+static void fsm_driver(struct rel_fsm_st *fsm)
+{
+    ......
+}
+```
+
+* 1：定义job数组最多能承载的job数
+* 21、24：确保一个job里的文件都是以非阻塞的形式打开的
+* 34、35、45：在数组中找空位，如果涉及到对数组的操作的话就需要把数组作为独占资源，这时就需要用到锁了
+* 12：运行一个线程module_load去专门执行状态机的状态转移操作，并且只能初始化一次，即动态模块的单次初始化，所以需要使用pthread_once函数
+* 61、71：thr_relayer函数的作用是找到当前非空的job，推动其中的两个状态机运行，并且保证当前job的状态是RUNNING，如果是CANCELED或者是ERROR则不转移状态
+
+完整代码
+
+```c
+// relayer.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <string.h>
+#include <fcntl.h>
+#include "relayer.h"
+
+#define BUFSIZE 1024
+
+static struct rel_job_st *rel_job[REL_JOBMAX];
+static pthread_mutex_t mut_rel_job = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+
+enum
+{
+    //几种状态
+    STATE_R,
+    STATE_W,
+    STATE_EX,
+    STATE_T
+};
+
+enum
+{
+    STATE_RUNNING = 1,
+    STATE_CANCELED,
+    STATE_OVER
+};
+
+//状态机
+struct rel_fsm_st
+{
+    int state;         //记录状态
+    int sfd;           //源文件
+    int dfd;           //目的文件
+    char buf[BUFSIZE]; //中间缓冲区
+    int len;           //读到的长度
+    int pos;           //写的过程如果一次没有写完，记录上次写的位置
+    char *err;         //错误信息
+    int64_t count;     //输出字符数量
+};
+
+//每一对终端结构体
+struct rel_job_st
+{
+    //两个终端
+    int fd1;
+    int fd2;
+    //该对终端状态STATE_RUNNING，STATE_CANCELED, STATE_OVER
+    int job_state;
+    //两个终端的状态机结构体
+    struct rel_fsm_st fsm12, fsm21;
+    //用来退出复原状态
+    int fd1_save, fd2_save;
+};
+
+//状态转移函数
+static void fsm_driver(struct rel_fsm_st *fsm)
+{
+    int ret;
+    switch (fsm->state)
+    {
+    case STATE_R:
+        fsm->len = read(fsm->sfd, fsm->buf, BUFSIZE);
+        if (fsm->len == 0)
+            fsm->state = STATE_T;
+        else if (fsm->len < 0)
+        {
+            if (errno == EAGAIN)
+                fsm->state = STATE_R;
+            else
+            {
+                fsm->err = "read()";
+                fsm->state = STATE_EX;
+            }
+        }
+        else
+        {
+            fsm->pos = 0;
+            fsm->state = STATE_W;
+        }
+
+        break;
+    case STATE_W:
+        ret = write(fsm->dfd, fsm->buf + fsm->pos, fsm->len);
+        if (ret < 0)
+        {
+            if (errno == EAGAIN)
+                fsm->state = STATE_W;
+            else
+            {
+                fsm->err = "write()";
+                fsm->state = STATE_EX;
+            }
+        }
+        else
+        {
+            fsm->pos += ret;
+            fsm->len -= ret;
+            if (fsm->len == 0)
+                fsm->state = STATE_R; //写完了再去读
+            else
+                fsm->state = STATE_W; //没写完继续写
+        }
+        break;
+    case STATE_EX:
+        perror(fsm->err);
+        fsm->state = STATE_T;
+        break;
+    case STATE_T:
+        /*  do smoething*/
+        break;
+    default:
+        abort();
+        break;
+    }
+}
+
+static void *thr_relayer(void *p)
+{
+    int i;
+    while (1)
+    {
+        pthread_mutex_lock(&mut_rel_job);
+        for (i = 0; i < REL_JOBMAX; i++)
+        {
+            if (rel_job[i] != NULL)
+            {
+                if (rel_job[i]->job_state == STATE_RUNNING)
+                {
+                    fsm_driver(&rel_job[i]->fsm12);
+                    fsm_driver(&rel_job[i]->fsm21);
+                    if (rel_job[i]->fsm12.state == STATE_T && rel_job[i]->fsm21.state == STATE_T)
+                        rel_job[i]->job_state = STATE_OVER;
+                }
+            }
+        }
+        pthread_mutex_unlock(&mut_rel_job);
+    }
+}
+
+static void module_load(void)
+{
+    int err;
+    pthread_t tid_relayer;
+    err = pthread_create(&tid_relayer, NULL, thr_relayer, NULL);
+    if (err)
+    {
+        fprintf(stderr, "pthread_create():%s\n", strerror(err));
+        exit(1);
+    }
+}
+
+static int get_free_pos_unlocked()
+{
+    int i;
+    for (i = 0; i < REL_JOBMAX; i++)
+    {
+        if (rel_job[i] == NULL)
+            return i;
+    }
+    return -1;
+}
+
+int rel_addjob(int fd1, int fd2)
+{
+    struct rel_job_st *me;
+    int pos;
+
+    pthread_once(&init_once, module_load);
+    me = malloc(sizeof(*me));
+    if (me == NULL) //空间问题
+        return -ENOMEM;
+    me->fd1 = fd1;
+    me->fd2 = fd2;
+    me->job_state = STATE_RUNNING; //该对终端设置正在运行
+
+    me->fd1_save = fcntl(me->fd1, F_GETFL);
+    fcntl(me->fd1, F_SETFL, me->fd1_save | O_NONBLOCK); //非阻塞	打开
+
+    me->fd2_save = fcntl(me->fd2, F_GETFL);
+    fcntl(me->fd2, F_SETFL, me->fd2_save | O_NONBLOCK); //非阻塞	打开
+
+    me->fsm12.sfd = me->fd1;
+    me->fsm12.dfd = me->fd2;
+    me->fsm12.state = STATE_R;
+
+    me->fsm21.sfd = me->fd2;
+    me->fsm21.dfd = me->fd1;
+    me->fsm21.state = STATE_R;
+
+    pthread_mutex_lock(&mut_rel_job);
+    pos = get_free_pos_unlocked();
+    if (pos < 0)
+    {
+        pthread_mutex_unlock(&mut_rel_job);
+        fcntl(me->fd1, F_SETFL, me->fd1_save);
+        fcntl(me->fd2, F_SETFL, me->fd2_save);
+        free(me);
+        return -ENOSPC;
+    }
+    rel_job[pos] = me;
+    pthread_mutex_unlock(&mut_rel_job);
+    return pos;
+}
+
+int rel_canceljob(int id);
+/*
+    return == 0			成功，指定任务成功取消
+           == -EINVAL	失败，参数非法
+           == -EBUSY    失败，任务早已被取消
+*/
+
+int rel_waitjob(int id, struct rel_stat_st *);
+
+int rel_statjob(int id, struct rel_stat_st *);
+```
+
+```c
+// relayer.h
+
+#ifndef RELAYER_H__
+#define RELAYER_H__
+
+#include <stdint.h>
+
+#define REL_JOBMAX 10000
+
+struct rel_stat_st
+{
+    int state;
+    int fd1;
+    int fd2;
+    int64_t count12, count21; // 1向2发送了多少字节，2向1发送了多少字节
+};
+
+int rel_addjob(int fd1, int fd2);
+/*
+    return >= 0			成功，返回当前任务ID
+           == -EINVAL	失败，参数非法
+           == -ENOSPC   失败，任务数组满
+           == -ENOMEM   失败，内存分配有误
+*/
+
+int rel_canceljob(int id);
+/*
+    return == 0			成功，指定任务成功取消
+           == -EINVAL	失败，参数非法
+           == -EBUSY    失败，任务早已被取消
+*/
+
+int rel_waitjob(int id, struct rel_stat_st *);
+/*
+    return == 0			成功，指定任务已终止并返回状态
+           == -EINVAL	失败，参数非法
+
+*/
+
+int rel_statjob(int id, struct rel_stat_st *);
+/*
+
+    return == 0			成功，指定任务状态返回
+           == -EINVAL	失败，参数非法
+
+*/
+#endif
+```
+
+```c
+// main.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
+#include "relayer.h"
+
+//两个设备为一对互传数据
+#define TTY1 "/dev/tty12"
+#define TTY2 "/dev/tty10"
+
+#define TTY3 "/dev/tty9"
+#define TTY4 "/dev/tty8"
+
+int main(int argc, char **argv)
+{
+    int fd1, fd2, fd3, fd4;
+    int job1, job2;
+    fd1 = open(TTY1, O_RDWR); //先以阻塞打开（故意先阻塞形式）
+    if (fd1 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd1, "TTY1\n", 5);
+    fd2 = open(TTY2, O_RDWR | O_NONBLOCK); //非阻塞
+    if (fd2 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd2, "TTY2\n", 5);
+
+    job1 = rel_addjob(fd1, fd2); //添加一对终端互传数据
+    if (job1 < 0)
+    {
+        fprintf(stderr, "rel_addjob():%s\n", strerror(-job1));
+        exit(1);
+    }
+
+    fd3 = open(TTY3, O_RDWR); //先以阻塞打开（故意先阻塞形式）
+    if (fd3 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd3, "TTY3\n", 5);
+    fd4 = open(TTY4, O_RDWR | O_NONBLOCK); //非阻塞
+    if (fd4 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd4, "TTY4\n", 5);
+
+    job2 = rel_addjob(fd3, fd4); //添加一对终端互传数据
+    if (job2 < 0)
+    {
+        fprintf(stderr, "rel_addjob():%s\n", strerror(-job2));
+        exit(1);
+    }
+
+    while (1)
+        pause();
+
+    close(fd4);
+    close(fd3);
+    close(fd2);
+    close(fd1);
+
+    exit(0);
+}
+```
+
+![image-20220329100443891](index5.assets/image-20220329100443891.png)
+
+![image-20220329100455106](index5.assets/image-20220329100455106.png)
+
+![image-20220329100505282](index5.assets/image-20220329100505282.png)
+
+![image-20220329100536452](index5.assets/image-20220329100536452.png)
+
+
+
 
 
 
