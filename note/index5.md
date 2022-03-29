@@ -1337,11 +1337,246 @@ select函数监视文件结果和一开始的文件被存放在相同集合中�
 
 
 
+# poll实例
 
+>NAME
+>
+>> poll, ppoll - wait for some event on a file descriptor
+>
+>SYNOPSIS
+>
+>> #include <poll.h>
+>>
+>> int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+>
+>1. poll是以文件描述符为单位来组织事件，第一个参数是结构体数组的起始位置，有几个结构体就意味着当前监视者多少个文件；第二个参数是当前文件描述符个数，也即结构体数组的长度；第三个参数为超时设置，单位是毫秒，如果timeout的值为0，则代表非阻塞，如果设置-1，则表示阻塞
+>
+>RETURN VALUE
+>
+>>  On  success,  a positive number is returned; this is the number of structures which have nonzero revents fields (in other words, those descriptors with events or errors reported). 
+>
+>
 
+1. 结构体pollfd
 
+```c
+struct pollfd {
+    int   fd;         /* file descriptor */
+    // 感兴趣的事件
+    short events;     /* requested events */
+    // 已经发生的事件
+    short revents;    /* returned events */
+};
+```
 
+使用poll函数重构relay.c程序
 
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/select.h>
+#include <poll.h>
+
+#define TTY1 "/dev/tty11"
+#define TTY2 "/dev/tty12"
+#define BUFSIZE 1024
+enum
+{
+    //几种状态
+    STATE_R,
+    STATE_W,
+    STATE_AUTO,
+    STATE_EX,
+    STATE_T
+};
+
+struct fsm_st
+{
+    int state;         //记录状态
+    int sfd;           //源文件
+    int dfd;           //目的文件
+    char buf[BUFSIZE]; //中间缓冲区
+    int len;           //读到的长度
+    int pos;           //写的过程如果一次没有写完，记录上次写的位置
+    char *err;         //错误信息
+};
+
+static void fsm_driver(struct fsm_st *fsm)
+{
+    int ret;
+    switch (fsm->state)
+    {
+        case STATE_R:
+            fsm->len = read(fsm->sfd, fsm->buf, BUFSIZE);
+            if (fsm->len == 0)
+                fsm->state = STATE_T;
+            else if (fsm->len < 0)
+            {
+                if (errno == EAGAIN)
+                    fsm->state = STATE_R;
+                else
+                {
+                    fsm->err = "read()";
+                    fsm->state = STATE_EX;
+                }
+            }
+            else
+            {
+                fsm->pos = 0;
+                fsm->state = STATE_W;
+            }
+
+            break;
+        case STATE_W:
+            ret = write(fsm->dfd, fsm->buf + fsm->pos, BUFSIZE);
+            if (ret < 0)
+            {
+                if (errno == EAGAIN)
+                    fsm->state = STATE_W;
+                else
+                {
+                    fsm->err = "write()";
+                    fsm->state = STATE_EX;
+                }
+            }
+            else
+            {
+                fsm->pos += ret;
+                fsm->len -= ret;
+                if (fsm->len == 0)
+                    fsm->state = STATE_R; //写完了再去读
+                else
+                    fsm->state = STATE_W; //没写完继续写
+            }
+            break;
+        case STATE_EX:
+            perror(fsm->err);
+            fsm->state = STATE_T;
+            break;
+        case STATE_T:
+            /*  do smoething*/
+            break;
+        default:
+            abort();
+            break;
+    }
+}
+
+static int max(int a, int b)
+{
+    return a > b ? a : b;
+}
+static void relay(int fd1, int fd2)
+{
+    struct fsm_st fsm12, fsm21;
+    struct pollfd pfd[2];
+    int fd1_save = fcntl(fd1, F_GETFL);
+    fcntl(fd1, F_SETFL, fd1_save | O_NONBLOCK); //非阻塞	打开
+
+    int fd2_save = fcntl(fd2, F_GETFL);
+    fcntl(fd2, F_SETFL, fd2_save | O_NONBLOCK); //非阻塞	打开
+
+    //初始状态
+    fsm12.state = STATE_R;
+    fsm12.sfd = fd1;
+    fsm12.dfd = fd2;
+
+    fsm21.state = STATE_R;
+    fsm21.sfd = fd2;
+    fsm21.dfd = fd1;
+
+    pfd[0].fd = fd1;
+    pfd[1].fd = fd2;
+    while (fsm12.state != STATE_T || fsm21.state != STATE_T)
+    {
+
+        //布置监视任务
+        pfd[0].events = 0;          //位图清0
+        if (fsm12.state == STATE_R) //如果可读，或上读的事件
+            pfd[0].events |= POLLIN;
+        if (fsm21.state == STATE_W)
+            pfd[0].events |= POLLOUT;
+
+        pfd[1].events = 0;
+        if (fsm12.state == STATE_W)
+            pfd[1].events |= POLLOUT;
+        if (fsm21.state == STATE_R)
+            pfd[1].events |= POLLIN;
+
+        //监视
+        if (fsm12.state < STATE_AUTO || fsm21.state < STATE_AUTO)
+        {
+            while (poll(pfd, 2, -1) < 0)
+            { // pollfd数组首地址， 数组长度， 阻塞形式
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                perror("poll()");
+                exit(1);
+            }
+        }
+
+        //查看监视结果
+        //如果1可读2可写或者处于EX,T态
+        if (pfd[0].revents & POLLIN || pfd[1].revents & POLLOUT || fsm12.state > STATE_AUTO) 
+            fsm_driver(&fsm12);
+        //如果2可读1可写
+        if (pfd[1].revents & POLLIN || pfd[0].revents & POLLOUT || fsm21.state > STATE_AUTO) 
+            fsm_driver(&fsm21);
+    }
+
+    //复原退出
+    fcntl(fd1, F_SETFL, fd1_save);
+    fcntl(fd2, F_SETFL, fd2_save);
+}
+
+int main(int argc, char **argv)
+{
+    int fd1, fd2;
+    fd1 = open(TTY1, O_RDWR); //先以阻塞打开（故意先阻塞形式）
+    if (fd1 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd1, "TTY1\n", 5);
+    fd2 = open(TTY2, O_RDWR | O_NONBLOCK); //非阻塞
+    if (fd2 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd2, "TTY2\n", 5);
+    relay(fd1, fd2); //核心代码
+
+    close(fd2);
+    close(fd1);
+
+    exit(0);
+}
+
+```
+
+* 103：定义pollfd结构体数组，并且数组大小为2，因为监视的文件描述符的个数为2
+* 140：因为不存在select函数中的集合覆盖问题，观看pollfd结构体，感兴趣的行为和已经发生的行为是存放在两个不同的地方的，所以可以使用while循环，`poll(pfd, 2, -1)`发生了感兴趣的行为，查看什么行为可以做了才去推动状态机，所以这里设置-1为阻塞状态，直到有感兴趣的行为发生，如果发生假错就立刻再次进入循环执行poll判断
+
+>DESCRIPTION
+>
+>> The bits that may be set/returned in events and revents are defined in <poll.h>:
+>>
+>> POLLIN：是否可读
+>> POLLPRI
+>> POLLOUT：是否可写
+>> POLLERR
+>> ......
+>
+>* events and revents是位图，并且一共有7种值，而select函数对事件的定义只有两种即读和写；位图的操作方式是按位与或者按位或
 
 
 
