@@ -1061,6 +1061,284 @@ int main(int argc, char **argv)
 
 ![image-20220329100536452](index5.assets/image-20220329100536452.png)
 
+# 高级IO-select 
+
+在运行之前的relayer程序的时候一定是出于盲等的状态，CPU一下子就被占满了，之前的程序应该说大部分时间都在处理ERRAGAIN，比如说状态机初始化是一个读态，只要没有内容的话数据就没有办法读，那么read返回的就是一个假错，继续把状态机推动到读态，我们不断地在一个while循环中碰到一个假错就推动到读态，以此类推周而复始
+
+对于IO密集型任务可以对其进行IO多路转接，IO多路转接的作用说白了就是监视文件描述符的行为，当当前文件描述符发生了用户感兴趣的行为之后才去做后续操作。比如两个设备做数据交换，我们之前都是一直在探测文件有无数据可读或者可写，如果用上IO多路转接的话就，布置一个监视任务，让程序知道什么是用户感兴趣的任务，比如说告诉程序当线程处于读态的时候在某个文件描述符上数据的话就把读态转变成写态
+
+IO多路转接有三个方式：
+
+1. select
+2. poll
+3. epoll
+
+这三个函数都能做到IO多路转接，简而言之就是实现对文件的监视，区别在于select的移植性非常好，但是本身设计有缺陷；select函数和poll函数用来监视文件描述符的行为的组织思路是完全不一样的，select是以事件为单位组织文件描述符，而poll是以文件描述符为单位组织事件；因为poll函数的IO效率还是不够高，所以各个平台都在poll函数的基础上实现了自家的方言，而epoll就是linux平台上基于poll做的一个方言来完成文件描述符的监视，poll是用户自己来维护一些内容，而epoll企图简化用户所维护的内容，所以说epoll是不能够移植的，select和poll是可以移植的
+
+>NAME
+>
+>> select, pselect, FD_CLR, FD_ISSET, FD_SET, FD_ZERO - synchronous I/O multiplexing
+>
+>SYNOPSIS
+>
+>> /* According to POSIX.1-2001, POSIX.1-2008 */
+>> #include <sys/select.h>
+>>
+>> /* According to earlier standards */
+>> #include <sys/time.h>
+>> #include <sys/types.h>
+>> #include <unistd.h>
+>>
+>> int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout);
+>
+>1. select：fd_set表示文件描述符的集合，我们之前学过sigset_t，这代表信号集；第一个参数nfds表示select函数所监视的文件描述符中最大值再+1，比如当前监视的所有文件描述符中最大的值为3579，那么nfds的值就为3580；第二个参数是一个读文件的文件描述符集合，即用户所关心的可能发生读操作的文件都放在readfds集合中；第三个参数是所关心的可能发生写操作的文件的集合；第四个参数是可能发生异常的文件描述符集合，前面三个集合中如果其中的任意一个集合中的文件发生了对应的事件，比如读集中有一个文件可读了，那么select函数就会返回；最后一个参数表示超时设置，如果没有超时设置就会发生死等直到用户感兴趣的事件发生
+>2. select函数会返回三个集合中发生了对应感兴趣行为的文件描述符个数，如果在超时时间内没有发生只扫一个感兴趣的行为的话就会返回假错
+>3. 当执行了一次select函数之后，这三个文件描述符的集合就会被替换成存放结果的文件集合，而不是原来的文件集合了，也就是说如果执行一次select操作后返回的值不大于0，也就是说没有文件执行感兴趣的行为，则执行select函数之后，这三个集合都会被置NULL，并且可以看到这三个集合没有被const修饰，也就是说会发生改变
+
+1. 以下四个操作函数都是关于fd_set的
+
+```c
+// 从指定集合中删除文件描述符fd
+void FD_CLR(int fd, fd_set *set);
+// 判断集合中是否存在文件描述符fd
+int  FD_ISSET(int fd, fd_set *set);
+// 把文件描述符fd放入集合中
+void FD_SET(int fd, fd_set *set);
+// 清空一个文件描述符集合
+void FD_ZERO(fd_set *set);
+```
+
+![image-20220329130856314](index5.assets/image-20220329130856314.png)
+
+使用select函数重构relay程序，之前的程序处于盲等状态是因为下面的while循环代码块
+
+```c
+while (fsm12.state != STATE_T || fsm21.state != STATE_T)
+{
+    fsm_driver(&fsm12);
+    fsm_driver(&fsm21);
+}
+```
+
+如果使用select函数的话就不能盲目地进行状态的变化，直到发生了感兴趣的行为为止，下面的代码为实现代码框架
+
+```c
+while (fsm12.state != STATE_T || fsm21.state != STATE_T)
+{
+    // 布置监视任务
+
+    // 监视
+    select();
+
+    // 查看监视结果
+    // 根据监视结果有条件地推动状态机
+    if()
+    	fsm_driver(&fsm12);
+    if() 
+        fsm_driver(&fsm21);
+}
+```
+
+完整代码
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#define TTY1 "/dev/tty8"
+#define TTY2 "/dev/tty9"
+#define BUFSIZE 1024
+
+enum
+{
+    STATE_R = 1, // read
+    STATE_W,     // write
+    STATE_AUTO,
+    STATE_EX, // error
+    STATE_T   // over
+};
+
+struct fsm_st
+{
+    int state;
+    int sfd;
+    int dfd;
+    char buf[BUFSIZE];
+    int len;
+    int pos;
+    char *errstr;
+};
+
+static void fsm_driver(struct fsm_st *fsm)
+{
+    int ret;
+
+    switch (fsm->state)
+    {
+    case STATE_R:
+        fsm->len = read(fsm->sfd, fsm->buf, BUFSIZE);
+        if (fsm->len == 0)
+            fsm->state = STATE_T;
+        else if (fsm->len < 0)
+        {
+            if (errno == EAGAIN)
+                fsm->state = STATE_R;
+            else
+            {
+                fsm->errstr = "read()";
+                fsm->state = STATE_EX;
+            }
+        }
+        else
+        {
+            fsm->pos = 0;
+            fsm->state = STATE_W;
+        }
+        break;
+    case STATE_W:
+        ret = write(fsm->dfd, fsm->buf + fsm->pos, fsm->len);
+        if (ret < 0)
+        {
+            if (errno == EAGAIN)
+                fsm->state = STATE_W;
+            else
+            {
+                fsm->errstr = "write()";
+                fsm->state = STATE_EX;
+            }
+        }
+        else
+        {
+            fsm->pos += ret;
+            fsm->len -= ret;
+            if (fsm->len == 0)
+                fsm->state = STATE_R;
+            else
+                fsm->state = STATE_W;
+        }
+        break;
+    case STATE_EX:
+        perror(fsm->errstr);
+        fsm->state = STATE_T;
+        break;
+    case STATE_T:
+        break;
+    default:
+        abort();
+        break;
+    }
+}
+
+static int max(int a, int b)
+{
+    return a > b ? a : b;
+}
+
+static void relay(int fd1, int fd2)
+{
+    int fd1_save, fd2_save;
+    struct fsm_st fsm12, fsm21;
+    fd_set rset, wset;
+
+    fd1_save = fcntl(fd1, F_GETFL);
+    fcntl(fd1, F_SETFL, fd1_save | O_NONBLOCK);
+
+    fd2_save = fcntl(fd2, F_GETFL);
+    fcntl(fd2, F_SETFL, fd2_save | O_NONBLOCK);
+
+    fsm12.state = STATE_R;
+    fsm12.sfd = fd1;
+    fsm12.dfd = fd2;
+
+    fsm21.state = STATE_R;
+    fsm21.sfd = fd2;
+    fsm21.dfd = fd1;
+
+    while (fsm12.state != STATE_T || fsm21.state != STATE_T)
+    {
+        FD_ZERO(&rset);
+        FD_ZERO(&wset);
+
+        if (fsm12.state == STATE_R)
+            FD_SET(fsm12.sfd, &rset);
+        if (fsm12.state == STATE_W)
+            FD_SET(fsm12.dfd, &wset);
+        if (fsm21.state == STATE_R)
+            FD_SET(fsm21.sfd, &rset);
+        if (fsm21.state == STATE_W)
+            FD_SET(fsm21.dfd, &wset);
+
+        if (fsm12.state < STATE_AUTO || fsm21.state < STATE_AUTO)
+        {
+            if (select(max(fd1, fd2) + 1, &rset, &wset, NULL, NULL) < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                perror("select()");
+                exit(1);
+            }
+        }
+
+        if (FD_ISSET(fd1, &rset) || FD_ISSET(fd2, &wset) || fsm12.state > STATE_AUTO)
+            fsm_driver(&fsm12);
+        if (FD_ISSET(fd2, &rset) || FD_ISSET(fd1, &wset) || fsm21.state > STATE_AUTO)
+            fsm_driver(&fsm21);
+    }
+
+    fcntl(fd1, F_SETFL, fd1_save);
+    fcntl(fd2, F_SETFL, fd2_save);
+}
+
+int main()
+{
+    int fd1, fd2;
+
+    fd1 = open(TTY1, O_RDWR);
+    if (fd1 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd1, "TTY1\n", 5);
+
+    fd2 = open(TTY2, O_RDWR | O_NONBLOCK);
+    if (fd2 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd2, "TTY2\n", 5);
+
+    relay(fd1, fd2);
+
+    close(fd2);
+    close(fd1);
+
+    exit(0);
+}
+```
+
+* 135-141：第一个参数就是选择最大的那个文件描述符再+1，以及设置读集、写集、异常集、超时时间，如果发生了感兴趣行为的文件描述符个数小于0的话处于假错状态；第135行的判断不能是一个循环判断，按照我们之前的写法，如果select不设置超时时间从而处于阻塞等状态，被一个信号打断就会假错，此时应该通过一个while循环再次进行文件描述符个数的判断，但是这里不行，因为我们之前讲过了select函数会导致三个集合发生改变，不再是一开始的集合了，并且如果select函数返回的符合条件的文件描述符个数为0，那么这三个集合就会被置为NULL，所以无法继续执行下一次循环的select，下一次循环又要重新执行124-131这么多行代码。如果是真错的话就报错退出
+* 121-131：监视任务的布置就需要用到之前讲到的4个针对文件描述符集合操作的函数，然后根据当前状态机的状态来确定什么状态时候监视文件描述符的什么行为
+* 121-122：把读、写集置为空
+* 124、126、128、130：如果当前状态机fsm12的状态是读态，那么就把文件描述符fd1放入读集中；如果状态即fsm12的状态是写态，那么就把文件描述符fd2，就把文件描述符fd2放入写集中；同理设置fsm21中的文件放入对应的集合中
+* 144-147：根据监视结果有效地推动状态机，如果此时fd1可读或者fd2可写的话则推动状态机fsm12，同理推动状态机fsm21，如何判断文件可读或者可写呢？只需要判断相应文件描述符是否在对应集合里
+* STATE_AUTO：之前我们写的代码只判断了读写态时候的行为，但是没有指定处于EX态时候的行为，所以这个字段是为了判断当前状态是否是读态还是写态，如果是两者中的其中一个的话才去尝试调用select函数，如果不是的话，即如果是EX态的话就无条件自动推动到T态
+
+![image-20220329142500685](index5.assets/image-20220329142500685.png)
+
+select函数监视文件结果和一开始的文件被存放在相同集合中，会导致下一次循环会执行无数重复的代码；第二个问题是select函数的第一个参数的类型是int，但是文件描述符的个数是可以通过ulimit命令来改变的，如果文件描述符最大值+1超过了有符号整型最大值的话会导致溢出，并且文件描述符只能用正数来表示，这里的int负数也可以表示，意味着有很多数被浪费了；select以事件为单位组织文件描述符，比如读事件、写事件、异常事件，并以此创建了对应的三个集合，但是事件种类太过单一，除了读、写其他事件全部被视作异常事件
+
+
+
+
+
 
 
 
