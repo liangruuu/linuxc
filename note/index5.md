@@ -1578,6 +1578,316 @@ int main(int argc, char **argv)
 >
 >* events and revents是位图，并且一共有7种值，而select函数对事件的定义只有两种即读和写；位图的操作方式是按位与或者按位或
 
+# epoll实例
+
+>NAME
+>
+>> epoll - I/O event notification facility
+>
+>SYNOPSIS
+>
+>> #include <sys/epoll.h>
+>
+>DESCRIPTION
+>
+>> epoll_create(2)  creates a new epoll instance and returns a file descriptor referring to that instance.
+>>
+>> Interest in particular file descriptors is then registered via epoll_ctl(2), which adds items to the interest list  of the epoll instance.
+>>
+>> epoll_wait(2)  waits  for  I/O events, blocking the calling thread if no events are currently available.
+>
+>1. 如果要使用epoll来监视文件描述的行为的话，就需要以上的三个操作，step1：通过epoll_create创建一个epoll实例；第二步使用epoll_ctl进行epoll实例的监视或者控制；step3：查看监视结果或者获取监视事件的话执行epoll_wait操作，以上三个函数全是系统调用级别的函数
+>2. poll与epoll的区别：使用poll机制的时候是建立一个数组，其中有n个成员，每个成员是一个结构体类型，结构体里有文件描述符、事件......这个操作是处于用户态的，实际上是在用户的角度维护数组并且进行IO操作。但是在epoll机制下，所做的操作是在内核态，而用户处于用户态，即相当于是内核来维护这个数组来帮助维护所有的文件描述符、感兴趣的事件、返回的事件.....内核来提供一些系统调用然后用户通过这些方法来进行IO实现
+
+![image-20220329193016141](index5.assets/image-20220329193016141.png)
+
+1. epoll_create
+
+>NAME
+>
+>> epoll_create, epoll_create1 - open an epoll file descriptor
+>
+>SYNOPSIS
+>
+>> #include <sys/epoll.h>
+>>
+>> int epoll_create(int size);
+>> int epoll_create1(int flags);
+>
+>* epoll_create(int size)用来打开一个文件描述符，也就是说创建一个epoll实例，这个size不是我们想象的所维护的用来保存结构体的数组的大小，想写几都行，函数执行成功返回文件描述符，失败返回-1并设置errno
+
+2. epoll_ctl
+
+>NAME
+>
+>> epoll_ctl - control interface for an epoll file descriptor
+>
+>SYNOPSIS
+>
+>> #include <sys/epoll.h>
+>>
+>> int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+>
+>* epoll_ctl：用来控制一个epoll实例，第一个参数就是刚才通过epoll_create创建的epoll实例；第二个参数指的是对epoll实例执行的操作op；第三个参数表示epoll操作针对的对象是哪个文件描述符；第四个参数为要针对的是哪个事件，epoll_event结构体如下，第一个参数指的是感兴趣的事件，用32位的位图来表示，常用的值有EPOLLIN、EPOLLOUT、EPOLLERR.....第二个变量是tyedef出来的共用体
+>
+>```c
+>struct epoll_event {
+>    uint32_t     events;    /* Epoll events */
+>    epoll_data_t data;      /* User data variable */
+>};
+>```
+>
+>```c
+>typedef union epoll_data {
+>    void        *ptr;
+>    int          fd;
+>    uint32_t     u32;
+>    uint64_t     u64;
+>} epoll_data_t;
+>
+>```
+>
+>
+
+* op操作有`EPOLL_CTL_ADD`, `EPOLL_CTL_MOD`, `EPOLL_CTL_DEL`，比如给epfd实例当中的某个文件描述符EPOLL_CTL_ADD(添加)某个行为event，或者比如说EPOLL_CTL_MOD(修改)epfd实例当中的文件描述符fd的某个行为event，所以这个epoll_ctl函数实际上相当于把原来poll的机制给继续封装了一层，不让用户直接操作数组，而是以系统调用的方式提供给用户帮用户管理这个数组
+
+3. epoll_wait
+
+>NAME
+>
+>> epoll_wait, epoll_pwait - wait for an I/O event on an epoll file descriptor
+>
+>SYNOPSIS
+>
+>> #include <sys/epoll.h>
+>>
+>> int epoll_wait(int epfd, struct epoll_event \*events, int maxevents, int timeout);
+>
+>* epoll_wait：往外取正在发生的事件
+>
+>
+
+* epoll_wait第一个参数是epoll实例；第二个参数是结构体类型的数组的起始地址；第三个参数是最多能获取的事件数，即从内核维护的数组中获取maxevents个事件然后存放到epoll_event类型的数组中；第四个参数为超时时间，-1表示阻塞，0表示非阻塞
+
+使用epoll重构relayer程序
+
+```c
+// relay_e.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/epoll.h>
+
+#define TTY1 "/dev/tty11"
+#define TTY2 "/dev/tty12"
+#define BUFSIZE 1024
+enum
+{
+    //几种状态
+    STATE_R,
+    STATE_W,
+    STATE_AUTO,
+    STATE_EX,
+    STATE_T
+};
+
+struct fsm_st
+{
+    int state;         //记录状态
+    int sfd;           //源文件
+    int dfd;           //目的文件
+    char buf[BUFSIZE]; //中间缓冲区
+    int len;           //读到的长度
+    int pos;           //写的过程如果一次没有写完，记录上次写的位置
+    char *err;         //错误信息
+};
+
+static void fsm_driver(struct fsm_st *fsm)
+{
+    int ret;
+    switch (fsm->state)
+    {
+    case STATE_R:
+        fsm->len = read(fsm->sfd, fsm->buf, BUFSIZE);
+        if (fsm->len == 0)
+            fsm->state = STATE_T;
+        else if (fsm->len < 0)
+        {
+            if (errno == EAGAIN)
+                fsm->state = STATE_R;
+            else
+            {
+                fsm->err = "read()";
+                fsm->state = STATE_EX;
+            }
+        }
+        else
+        {
+            fsm->pos = 0;
+            fsm->state = STATE_W;
+        }
+
+        break;
+    case STATE_W:
+        ret = write(fsm->dfd, fsm->buf + fsm->pos, BUFSIZE);
+        if (ret < 0)
+        {
+            if (errno == EAGAIN)
+                fsm->state = STATE_W;
+            else
+            {
+                fsm->err = "write()";
+                fsm->state = STATE_EX;
+            }
+        }
+        else
+        {
+            fsm->pos += ret;
+            fsm->len -= ret;
+            if (fsm->len == 0)
+                fsm->state = STATE_R; //写完了再去读
+            else
+                fsm->state = STATE_W; //没写完继续写
+        }
+        break;
+    case STATE_EX:
+        perror(fsm->err);
+        fsm->state = STATE_T;
+        break;
+    case STATE_T:
+        /*  do smoething*/
+        break;
+    default:
+        abort();
+        break;
+    }
+}
+
+static int max(int a, int b)
+{
+    return a > b ? a : b;
+}
+static void relay(int fd1, int fd2)
+{
+    struct fsm_st fsm12, fsm21;
+    int epfd;
+    struct epoll_event ev;
+    int fd1_save = fcntl(fd1, F_GETFL);
+    fcntl(fd1, F_SETFL, fd1_save | O_NONBLOCK); //非阻塞	打开
+
+    int fd2_save = fcntl(fd2, F_GETFL);
+    fcntl(fd2, F_SETFL, fd2_save | O_NONBLOCK); //非阻塞	打开
+
+    //初始状态
+    fsm12.state = STATE_R;
+    fsm12.sfd = fd1;
+    fsm12.dfd = fd2;
+
+    fsm21.state = STATE_R;
+    fsm21.sfd = fd2;
+    fsm21.dfd = fd1;
+
+    epfd = epoll_create(10);	// 参数是任意值，随便取了个10
+    if (epfd < 0)
+    {
+        perror("epoll_create()");
+        exit(1);
+    }
+    ev.events = 0;	// 暂时无行为
+    ev.data.fd = fd1; // 把文件描述符fd1放入epoll机制中，让epoll来进行管理
+    epoll_ctl(epfd, EPOLL_CTL_ADD, fd1, &ev);
+
+    ev.events = 0;
+    ev.data.fd = fd2;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, fd2, &ev);
+    while (fsm12.state != STATE_T || fsm21.state != STATE_T)
+    {
+
+        //布置监视任务
+        ev.data.fd = fd1;
+        ev.events = 0; //位图清0
+
+        if (fsm12.state == STATE_R) //如果可读
+            ev.events |= EPOLLIN;
+        if (fsm21.state == STATE_W)
+            ev.events |= EPOLLOUT;
+
+        epoll_ctl(epfd, EPOLL_CTL_MOD, fd1, &ev);
+
+        ev.data.fd = fd2;
+        ev.events = 0; //位图清0
+        if (fsm12.state == STATE_W)
+            ev.events |= EPOLLOUT;
+        if (fsm21.state == STATE_R)
+            ev.events |= EPOLLIN;
+
+        //监视
+        if (fsm12.state < STATE_AUTO || fsm21.state < STATE_AUTO)
+        {
+            while (epoll_wait(epfd, &ev, 1, -1) < 0)
+            { //
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                perror("epoll_wait()");
+                exit(1);
+            }
+        }
+
+        //查看监视结果
+        if (ev.data.fd == fd1 && ev.events & EPOLLIN || ev.data.fd == fd2 && ev.events & EPOLLOUT || fsm12.state > STATE_AUTO) //如果1可读2可写或者处于EX,T态
+            fsm_driver(&fsm12);
+        if (ev.data.fd == fd1 && ev.events & EPOLLOUT || ev.data.fd == fd2 && ev.events & EPOLLIN || fsm21.state > STATE_AUTO) //如果2可读1可写
+            fsm_driver(&fsm21);
+    }
+
+    //复原退出
+    fcntl(fd1, F_SETFL, fd1_save);
+    fcntl(fd2, F_SETFL, fd2_save);
+
+    close(epfd);
+}
+
+int main(int argc, char **argv)
+{
+    int fd1, fd2;
+    fd1 = open(TTY1, O_RDWR); //先以阻塞打开（故意先阻塞形式）
+    if (fd1 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd1, "TTY1\n", 5);
+    fd2 = open(TTY2, O_RDWR | O_NONBLOCK); //非阻塞
+    if (fd2 < 0)
+    {
+        perror("open()");
+        exit(1);
+    }
+    write(fd2, "TTY2\n", 5);
+    relay(fd1, fd2); //核心代码
+
+    close(fd2);
+    close(fd1);
+
+    exit(0);
+}
+```
+
+* 121、180：三步走，第一步用epoll_create创建epoll实例以及关闭文件描述符
+* 146：第二步用epoll_ctl对epoll实例中的某个文件描述符进行行为的添加修改等操作
+* 158：使用epoll_wait监视并取出事件
+
+
+
+
+
 
 
 
