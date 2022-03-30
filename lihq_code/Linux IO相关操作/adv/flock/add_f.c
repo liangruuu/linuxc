@@ -8,14 +8,13 @@
 #define LINESIZE 1024
 #define FNAME "/tmp/out"
 
-
 static void func_add(void)
 {
     FILE *fp;
     char linebuf[LINESIZE];
 
     fp = fopen(FNAME, "r+");
-    if(fp == NULL)
+    if (fp == NULL)
     {
         perror("fopen()");
         exit(1);
@@ -41,24 +40,24 @@ int main()
     int i;
     pid_t pid;
 
-    for(i = 0; i < PROCNUM; i++)
+    for (i = 0; i < PROCNUM; i++)
     {
         pid = fork();
-        if(pid < 0)
+        if (pid < 0)
         {
             perror("fork()");
             exit(1);
         }
 
-        if(pid == 0)
+        if (pid == 0)
         {
             func_add();
             exit(0);
         }
     }
 
-    for(i = 0; i < PROCNUM; i++)
+    for (i = 0; i < PROCNUM; i++)
         wait(NULL);
-    
+
     exit(0);
 }
