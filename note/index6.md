@@ -457,6 +457,303 @@ int main()
 }
 ```
 
+# 进程间通信-消息队列详解
+
+IPC——>Inter-Process Communication
+
+XSI IPC中有三种机制：
+
+1. Message Queues消息队列
+2. Semaphore Arrays信号量数组
+3. Shared Memory共享内存
+
+```shell
+liangruuu@liangruuu-virtual-machine:~$ ipcs
+
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages    
+
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+0x00000000 10         liangruuu  600        524288     2          dest         
+0x00000000 11         liangruuu  600        524288     2          dest         
+0x00000000 14         liangruuu  600        7786496    2          dest         
+0x00000000 15         liangruuu  600        7786496    2          dest         
+0x00000000 18         liangruuu  600        524288     2          dest         
+0x00000000 21         liangruuu  600        524288     2          dest         
+0x00000000 26         liangruuu  600        73728      2          dest         
+0x00000000 27         liangruuu  600        73728      2          dest         
+0x00000000 28         liangruuu  600        45056      2          dest         
+0x00000000 29         liangruuu  600        45056      2          dest         
+0x00000000 32         liangruuu  600        524288     2          dest         
+
+------ Semaphore Arrays --------
+key        semid      owner      perms      nsems 
+```
+
+这三种机制可以用于有亲缘关系的进程间通信，也可以用于没有亲缘关系的进程间通信
+
+key是为了确定通信双方拿到同一个通信机制来进行实现，可以理解成通信地点，确定了这个通信地点之后，通信双方就在约定的痛心地点通过管道进行通信。得到同一个key值是为了创建某一个实例，创建实例拿到id，通信双方拿到id之后
+
+>NAME
+>
+>> ftok - convert a pathname and a project identifier to a System V IPC key
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <sys/ipc.h>
+>>
+>> key_t ftok(const char *pathname, int proj_id);
+>
+>1. key_t ftok(const char *pathname, int proj_id)：pathname指的就是通信双方约定的通信地点
+
+![image-20220330142244685](/home/liangruuu/.config/Typora/typora-user-images/image-20220330142244685.png)
+
+Message Queues
+
+>NAME
+>
+>> msgget - get a System V message queue identifier
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <sys/ipc.h>
+>> #include <sys/msg.h>
+>>
+>> int msgget(key_t key, int msgflg);
+>
+>1. int msgget(key_t key, int msgflg)：获取一个消息队列的实例，以消息队列的id值作为返回值
+
+>NAME
+>
+>> msgrcv, msgsnd - System V message queue operations
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <sys/ipc.h>
+>> #include <sys/msg.h>
+>>
+>> int msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
+>> ssize_t msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg);
+>
+>1. 消息队列一端作为发送端msgsnd发送消息；一端作为接收端msgrcv接收消息，消息队列是双工的，双方都能往消息队列写数据，也都能从消息队列中拿数据
+
+>NAME
+>
+>> msgctl - System V message control operations
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>
+>> #include <sys/ipc.h>
+>> #include <sys/msg.h>
+>>
+>> int msgctl(int msqid, int cmd, struct msqid_ds *buf);
+>
+>1. msgctl：对某一个消息队列执行某一个操作cmd，buf是cmd的参数
+>
+>Valid values for cmd are:
+>
+>IPC_STAT
+>
+>IPC_SET
+>
+>IPC_RMID：删除当前消息队列
+
+使用消息队列实现一个小例子
+
+```c
+// proto.h
+
+#ifndef PROTO_H__
+#define PROTO_H__
+
+#define KEYPATH "/etc/services"
+#define KEYPROJ 'g'
+#define NAMESIZE 1024
+
+struct msg_st
+{
+    long mtype;
+    char name[NAMESIZE];
+    int math;
+    int chinese;
+};
+
+#endif
+```
+
+定义通信进程双方数据传输协议
+
+* 6-7：通信双方需要拿到同一个msgid，为了拿到同一个msgid则需要拿到同一个key值，要想拿到同一个key值则需要拿到同一个pathname和proj
+* 10-16：定义传输内容的格式，接收方按同样的格式解析
+* 12：代表消息的类型，值必须大于0
+
+代码骨架如下：
+
+```c
+// snder.c
+
+int main()
+{
+
+
+    ftok();
+
+    msgget();
+
+    msgsnd();
+
+    msgctl();	// 销毁消息队列
+    
+    exit(0);
+
+}
+```
+
+```c
+// rcver.c
+
+int main()
+{
+
+
+    ftok();
+
+    msgget();
+
+    msgrcv();
+
+    msgctl();	// 销毁消息队列
+
+    exit(0);
+
+}
+```
+
+区分消息队列两端角色是主动端还是被动端，主动端是先发数据包的一方，被动端是先收数据包的一方，并且一定是被动端先运行程序，所以说rcver先运行
+
+完整程序如下：
+
+```c
+// rcver.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ipc.h>
+#include <sys/types.h>
+#include <sys/msg.h>
+#include <unistd.h>
+#include "proto.h"
+
+int main()
+{
+    key_t key;
+    int msgid;
+    struct msg_st rbuf;
+
+    key = ftok(KEYPATH, KEYPROJ);
+    if (key < 0)
+    {
+        perror("ftok()");
+        exit(1);
+    }
+
+    msgid = msgget(key, IPC_CREAT | 0666);
+    if (msgid < 0)
+    {
+        perror("msgget()");
+        exit(1);
+    }
+
+    while (1)
+    {
+        if (msgrcv(msgid, &rbuf, sizeof(rbuf) - sizeof(long), 0, 0) < 0)
+        {
+            perror("msgrcv()");
+            exit(1);
+        }
+
+        fprintf(stdout, "name : %s ", rbuf.name);
+        fprintf(stdout, "chinese : %d ", rbuf.chinese);
+        fprintf(stdout, "math : %d\n", rbuf.math);
+        fflush(NULL);
+    }
+    //销毁当前实例
+    msgctl(key, IPC_RMID, NULL);
+
+    exit(0);
+}
+
+```
+
+* 14：主动端和被动端代码的区别在于主动端不用再重复使用IPC_CREAT，反之不能由主动端调用IPC_CREAT参数
+* 33：msgrcv函数的第一个参数表示消息队列ID，第二个参数表示获取数据存入的缓冲区，也第三个参数表示接收的数据类型有效的大小，这里因为msg_st结构体中的long型的mtype属性暂时没用，不属于消息中的内容，不在有效大小之内，mtype之后的变量才属于消息，所以需要把这个属性的大小删去
+
+```c
+// snder.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ipc.h>
+#include <sys/types.h>
+#include <sys/msg.h>
+#include <unistd.h>
+#include <string.h>
+
+#include "proto.h"
+
+int main()
+{
+
+    key_t key;
+    int msgid;
+    struct msg_st sbuf;
+
+    key = ftok(KEYPATH, KEYPROJ);
+    if (key < 0)
+    {
+        perror("ftok()");
+        exit(1);
+    }
+
+    msgid = msgget(key, 0);
+    if (msgid < 0)
+    {
+        perror("msgget()");
+        exit(1);
+    }
+
+    sbuf.mtype = 1;
+    strcpy(sbuf.name, "Alan");
+    sbuf.chinese = rand() % 100;
+    sbuf.math = rand() % 100;
+
+    if (msgsnd(msgid, &sbuf, sizeof(sbuf) - sizeof(long), 0) < 0)
+    {
+        perror("msgrcv()");
+        exit(1);
+    }
+
+    puts("ok!");
+
+    exit(0);
+}
+```
+
+<img src="/home/liangruuu/.config/Typora/typora-user-images/image-20220330153803335.png" alt="image-20220330153803335" style="zoom:80%;" />
+
+
+
+
+
+
+
+
+
 
 
 
