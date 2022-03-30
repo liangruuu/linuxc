@@ -755,15 +755,218 @@ int main()
 
 
 
+# 消息队列-信号量详解及实例
+
+Semaphore Arrays
+
+* semget();
+* semop();
+* semctl();
+
+为什么需要信号量数组呢？在操作系统知识中有一个经典的题目，就是有多个资源，比如10个A资源，20个B资源，进程①需要5个A资源，15个B资源；进程②需要10个A资源，5个B资源；进程③需要3个A资源，5个B资源，求出进程可行的的执行顺序？正确的执行顺序为1->3或者3->1，其他执行顺序都会造成死锁，在这个问题中需要2个信号量即A和B，即把资源A和B都放入一个信号量数组中，如果信号量数组成员个数为1，也就表示一个信号量，如果数组中只有一个成员并且这个成员大小为1，那么就用信号量表示一个互斥量
+
+<img src="/home/liangruuu/.config/Typora/typora-user-images/image-20220330160825054.png" alt="image-20220330160825054" style="zoom:80%;" />
+
+用信号量数组重构之前往文件中输入自增数的例子
+
+```c
+// add_f.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/wait.h>
+
+#define PROCNUM 20
+#define LINESIZE 1024
+#define FNAME "/tmp/out"
 
 
+static void func_add(void)
+{
+    FILE *fp;
+    char linebuf[LINESIZE];
+
+    fp = fopen(FNAME, "r+");
+    if(fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+
+    int fd = fileno(fp);
+    lockf(fd, F_LOCK, 0);
+
+    fgets(linebuf, LINESIZE, fp);
+    fseek(fp, 0, SEEK_SET);
+    sleep(1);
+    fprintf(fp, "%d\n", atoi(linebuf) + 1);
+    fflush(fp);
+    lockf(fd, F_ULOCK, 0);
+    fclose(fp);
+
+    return;
+}
+
+int main()
+{
+
+    int i;
+    pid_t pid;
+
+    for(i = 0; i < PROCNUM; i++)
+    {
+        pid = fork();
+        if(pid < 0)
+        {
+            perror("fork()");
+            exit(1);
+        }
+
+        if(pid == 0)
+        {
+            func_add();
+            exit(0);
+        }
+    }
+
+    for(i = 0; i < PROCNUM; i++)
+        wait(NULL);
+    
+    exit(0);
+}
+
+```
+
+```c
+// add_s.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+
+#define PROCNUM 20
+#define LINESIZE 1024
+#define FNAME "/tmp/out"
+
+static int semid;
+
+static void P(void)
+{
+    struct sembuf op;
+    op.sem_num = 0;
+    op.sem_op = -1;
+    op.sem_flg = 0;
+
+    while(semop(semid, &op, 1) < 0)
+    {
+        if(errno != EINTR || errno != EAGAIN)
+        {
+            perror("semop()");
+            exit(1);
+        }
+
+    }
+}
+
+static void V(void)
+{
+    struct sembuf op;
+    op.sem_num = 0;
+    op.sem_op =  1;
+    op.sem_flg = 0;
+
+    if(semop(semid, &op, 1) < 0)
+    {
+        perror("semop()");
+        exit(1);
+
+    }
+
+}
 
 
+static void func_add(void)
+{
+    FILE *fp;
+    char linebuf[LINESIZE];
 
+    fp = fopen(FNAME, "r+");
+    if(fp == NULL)
+    {
+        perror("fopen()");
+        exit(1);
+    }
+    P();
+    fgets(linebuf, LINESIZE, fp);
+    fseek(fp, 0, SEEK_SET);
+    sleep(1);
+    fprintf(fp, "%d\n", atoi(linebuf) + 1);
+    fflush(fp);
+    V();
+    fclose(fp);
 
+    return;
+}
 
+int main()
+{
 
+    int i;
+    pid_t pid;
 
+    // key = ftok();
+    semid = semget(IPC_PRIVATE, 1, 0600);
+    if(semid < 0)
+    {
+        perror("semget()");
+        exit(1);
+    }
+
+    if(semctl(semid, 0, SETVAL, 1) < 0)
+    {
+        perror("semctl()");
+        exit(1);
+    }
+
+    for(i = 0; i < PROCNUM; i++)
+    {
+        pid = fork();
+        if(pid < 0)
+        {
+            perror("fork()");
+            exit(1);
+        }
+
+        if(pid == 0)
+        {
+            func_add();
+            exit(0);
+        }
+    }
+
+    for(i = 0; i < PROCNUM; i++)
+        wait(NULL);
+
+    semctl(semid, 0, IPC_RMID);
+
+    exit(0);
+}
+
+```
+
+* 83-84：ftok函数能用IPC_PRIVATE所替换，semget函数的第二个参数表示信号量数组中有几个元素，因为这个例子是互斥操作，所以数组中只有一个元素，而这个唯一的元素的值也为1，第三个参数0600表示创建一个信号量数组
+* 91：semctl函数表示要对指定的信号量数组的第几个下标的信号量进行cmd操作，第四个参数表示不同的cmd对应的传参，`semctl(semid, 0, SETVAL, 1)`表示对信号量数组下标为0的信号量的值设置为1，因为需要互斥操作
+* 116：销毁信号量数组中的当前信号量
+* 19-35：P操作代表获取资源量，函数中的循环表示当资源量小于0的时候一直处于阻塞状态，直到V操作把资源量增加到非0为止，`op.sem_op = -1;`就表示拿走一个资源
+* 37-51：V操作代表归还换资源量，`op.sem_op = 1;`就表示归还一个资源
 
 
 
