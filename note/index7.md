@@ -568,15 +568,355 @@ int main()
 
 ![image-20220331093129384](index7.assets/image-20220331093129384.png)![image-20220331093211496](index7.assets/image-20220331093211496.png) 
 
+# 套接字-多播实例
 
+报式套接字中还涉及到多点通信的内容，在流式套接字和报式套接字中只有报式套接字能实现多点通信，因为流式套接字是一对一、点对点的服务
 
+多点通信：广播（全网广播、子网广播）、多播/组播
 
+广播和组播之间更推荐使用组播，因为组播更灵活一点，广播的范围非常大，不管愿不愿意接受都必须接收广播数据，但是组播是建立一个多播组，如果愿意接受消息则加入这个多播组，然后在组间发消息，如果不想收到数据的话就离开多播组，但是多播中有一个特殊地址，如果往这个地址发消息的话就如同发送一个广播
 
+全网广播：往一个大家周知的地址上来发消息，比如说我们经常说的广播就是往255.255.255.255这个地址上发消息
 
+协议proto不需要变
 
+```c
+// snder.h
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
+#include "proto.h"
 
+#define IPSTRSIZE 40
+
+int main()
+{
+    int sd;
+    struct sockaddr_in raddr;
+    struct msg_st sbuf;
+    socklen_t raddr_len;
+    char ipstr[IPSTRSIZE];
+
+    sd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sd < 0)
+    {
+        perror("socket()");
+        exit(1);
+    }
+
+    int val = 1;
+    if (setsockopt(sd, SOL_SOCKET, SO_BROADCAST, &val, sizeof(val)) < 0)
+    {
+        perror("setockopt()");
+        exit(1);
+    }
+
+    memset(&sbuf, '\0', sizeof(sbuf));
+    strcpy(sbuf.name, "Alan");
+    sbuf.math = htonl(rand() % 100);
+    sbuf.chinese = htonl(rand() % 100);
+
+    raddr.sin_family = AF_INET;
+    raddr.sin_port = htons(atoi(RCVPROT));
+    inet_pton(AF_INET, "255.255.255.255", &raddr.sin_addr);
+
+    if (sendto(sd, &sbuf, sizeof(sbuf), 0, (void *)&raddr, sizeof(raddr)) < 0)
+    {
+        perror("sendto()");
+        exit(1);
+    }
+
+    puts("ok!");
+
+    close(sd);
+
+    exit(0);
+}
+```
+
+* 44：原本的发送方的代码是`sendto(sd, &sbuf, sizeof(sbuf), 0, (void *)&raddr, sizeof(raddr)`，把&sbuf地址上的内容发送到对端的&raddr地址上去，而对端IP地址是我们在终端上指定的，全网广播应该把IP地址设置成"255.255.255.255"，然后发送端往广播地址上发数据，接收端从广播地址上接收数据
+
+当前的广播实际上默认要求是不能够发出的，组播其实也一样，也就是说在默认的属性中是不能进行这种特殊内容的发送的，之前画过一张图说过各个协议可以对应各个不同的数据传输方式的实现，其实各个协议里面还有很多薄层，比如IP层，TCP层，SOCKET层...在不同的层上会有不同的开关可以来加以控制，全网广播是禁止被发送的，但是有一个开关能够实现广播操作，我们执行`man 7 socket`查看socket层，其中有socket options设置，也就是说当前socket封装出的传输当中有若干配置可以去更改
+
+>Socket options
+>
+>> The socket options listed below can be set by using setsockopt(2) and read with getsockopt(2) with the socket  level  set to SOL_SOCKET for all sockets.  Unless otherwise noted, optval is a pointer to an int.
+>>
+>> SO_ACCEPTCONN
+>>
+>> SO_ATTACH_FILTER
+>>
+>> SO_BROADCAST：Set or get the broadcast flag.  When enabled, datagram sockets are allowed to send packets to a broadcast address. This option has no effect on stream-oriented sockets.
+>>
+>> ......
+>
+>* 打开SO_BROADCAST设置就可以打开广播功能
+>* setsockopt、getsockopt
+
+执行`man 7 ip`查看IP层能控制什么
+
+>Socket options
+>
+>> IP_ADD_MEMBERSHIP
+>>
+>> ```c
+>> struct ip_mreqn {
+>>     struct in_addr imr_multiaddr; /* IP multicast group
+>>                                             address */
+>>     struct in_addr imr_address;   /* IP address of local
+>>                                             interface */
+>>     int            imr_ifindex;   /* interface index */
+>> };
+>> ```
+>>
+>> IP_ADD_SOURCE_MEMBERSHIP
+>>
+>> ......
+>
+>
+
+>NAME
+>
+>> getsockopt, setsockopt - get and set options on sockets
+>
+>SYNOPSIS
+>
+>> #include <sys/types.h>          /* See NOTES */
+>> #include <sys/socket.h>
+>>
+>> int getsockopt(int sockfd, int level, int optname, oid \*optval, socklen_t \*optlen);
+>> int setsockopt(int sockfd, int level, int optname, const void \*optval, socklen_t optlen);
+>
+>1. setsockopt：对某一个socket的某一个层面上level的某一个属性optname进行设置，由于所更改的属性是不相同的，所以不同的属性所需要的参数optval不同，有可能是整型也有可能是bool类型还有可能是结构体类型，因为参数大小是不一致的，所以也需要optlen来指定传参大小
+>2. level的值比如有tcp、ip、socket.......
+
+* 30-35：`setsockopt(sd, SOL_SOCKET, SO_BROADCAST, &val, sizeof(val)`针对sd的socket层中的SO_BROADCAST属性，把它的值改为val值
+
+```c
+// rcver.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+#include "proto.h"
+
+#define IPSTRSIZE 40
+
+int main()
+{
+    int sd;
+    struct sockaddr_in laddr, raddr;
+    struct msg_st rbuf;
+    socklen_t raddr_len;
+    char ipstr[IPSTRSIZE];
+
+    sd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sd < 0)
+    {
+        perror("socket()");
+        exit(1);
+    }
+
+    int val = 1;
+    if(setsockopt(sd, SOL_SOCKET, SO_BROADCAST, &val, sizeof(val)) < 0)
+    {
+        perror("setockopt()");
+        exit(1);
+    }
+
+    laddr.sin_family = AF_INET;
+    laddr.sin_port = htons(atoi(RCVPROT));
+    inet_pton(AF_INET, "0.0.0.0", &laddr.sin_addr);
+
+    if (bind(sd, (void *)&laddr, sizeof(laddr)) < 0)
+    {
+        perror("bind()");
+        exit(1);
+    }
+
+    raddr_len = sizeof(raddr);
+    while (1)
+    {
+        recvfrom(sd, &rbuf, sizeof(rbuf), 0, (void *)&raddr, &raddr_len);
+        inet_ntop(AF_INET, &raddr.sin_addr, ipstr, IPSTRSIZE);
+        printf("---MESSAGE FROM %s:%d---\n", ipstr, ntohs(raddr.sin_port));
+        printf("NAME = %s\n", rbuf.name);
+        printf("MATH = %d\n", ntohl(rbuf.math));
+        printf("CHINESE = %d\n", ntohl(rbuf.chinese));
+    }
+
+    close(sd);
+
+    exit(0);
+}
+```
+
+多播属于D类地址，D类地址都是224.xxx开头
+
+```c
+// proto.h
+
+#ifndef PROTO_H__
+#define PROTO_H__
+
+#define MGROUP "224.2.2.2"
+#define RCVPROT "1989"
+#define NAMESIZE 20
+
+struct msg_st
+{
+    uint8_t name[NAMESIZE];
+    uint32_t math;
+    uint32_t chinese;
+} __attribute__((packed)); //不对齐
+
+#endif
+```
+
+```c
+// snder.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+
+#include "proto.h"
+
+#define IPSTRSIZE 40
+
+int main()
+{
+    int sd;
+    struct sockaddr_in raddr;
+    struct msg_st sbuf;
+    socklen_t raddr_len;
+    char ipstr[IPSTRSIZE];
+
+    sd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sd < 0)
+    {
+        perror("socket()");
+        exit(1);
+    }
+
+    struct ip_mreqn mreq;
+    inet_pton(AF_INET, MGROUP, &mreq.imr_multiaddr);
+    inet_pton(AF_INET, "0.0.0.0", &mreq.imr_address);
+    mreq.imr_ifindex = if_nametoindex("enp3s0");
+
+    if (setsockopt(sd, IPPROTO_IP, IP_MULTICAST_IF, &mreq, sizeof(mreq)) < 0)
+    {
+        perror("setockopt()");
+        exit(1);
+    }
+
+    memset(&sbuf, '\0', sizeof(sbuf));
+    strcpy(sbuf.name, "Alan");
+    sbuf.math = htonl(rand() % 100);
+    sbuf.chinese = htonl(rand() % 100);
+
+    raddr.sin_family = AF_INET;
+    raddr.sin_port = htons(atoi(RCVPROT));
+    inet_pton(AF_INET, MGROUP, &raddr.sin_addr);
+
+    if (sendto(sd, &sbuf, sizeof(sbuf), 0, (void *)&raddr, sizeof(raddr)) < 0)
+    {
+        perror("sendto()");
+        exit(1);
+    }
+
+    puts("ok!");
+
+    close(sd);
+
+    exit(0);
+}
+```
+
+```c
+// rcver.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+
+#include "proto.h"
+
+#define IPSTRSIZE 40
+
+int main()
+{
+    int sd;
+    struct sockaddr_in laddr, raddr;
+    struct msg_st rbuf;
+    socklen_t raddr_len;
+    char ipstr[IPSTRSIZE];
+
+    sd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sd < 0)
+    {
+        perror("socket()");
+        exit(1);
+    }
+
+    struct ip_mreqn mreq;
+    inet_pton(AF_INET, MGROUP, &mreq.imr_multiaddr);
+    inet_pton(AF_INET, "0.0.0.0", &mreq.imr_address);
+    mreq.imr_ifindex = if_nametoindex("enp3s0");
+
+    if (setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
+    {
+        perror("setockopt()");
+        exit(1);
+    }
+
+    laddr.sin_family = AF_INET;
+    laddr.sin_port = htons(atoi(RCVPROT));
+    inet_pton(AF_INET, "0.0.0.0", &laddr.sin_addr);
+
+    if (bind(sd, (void *)&laddr, sizeof(laddr)) < 0)
+    {
+        perror("bind()");
+        exit(1);
+    }
+
+    raddr_len = sizeof(raddr);
+    while (1)
+    {
+        recvfrom(sd, &rbuf, sizeof(rbuf), 0, (void *)&raddr, &raddr_len);
+        inet_ntop(AF_INET, &raddr.sin_addr, ipstr, IPSTRSIZE);
+        printf("---MESSAGE FROM %s:%d---\n", ipstr, ntohs(raddr.sin_port));
+        printf("NAME = %s\n", rbuf.name);
+        printf("MATH = %d\n", ntohl(rbuf.math));
+        printf("CHINESE = %d\n", ntohl(rbuf.chinese));
+    }
+
+    close(sd);
+
+    exit(0);
+}
+```
+
+![image-20220331104701699](index7.assets/image-20220331104701699.png)
 
 
 

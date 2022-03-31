@@ -8,6 +8,7 @@
         "unistd.h": "c",
         "string.h": "c",
         "errno.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "socket.h": "c"
     }
 }
